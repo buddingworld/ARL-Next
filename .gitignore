@@ -87,7 +87,10 @@ ARL_server.md
 
 .claude/
 
+# AI 协作说明文件仅保留在本地，不入库
+# 大小写双写：Windows/macOS 默认大小写不敏感，但 Linux 上 AGENTS.md 无法匹配 Agents.md
 AGENTS.md
+Agents.md
 CLAUDE.md
 owl234.pem
 # Node 依赖目录不入库：镜像构建已在 .dockerignore 排除，本地如需还原执行 npm ci
