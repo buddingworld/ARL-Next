@@ -1,0 +1,21 @@
+[Unit]
+Description=ARL-Next Puppeteer Rendering Service (source deployment)
+Documentation=file:/opt/arl-next/deploy/source/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/arl-next
+Environment=TZ=Asia/Shanghai
+# puppeteer_server.js 以 NODE_PATH 解析全局安装的 puppeteer-core，
+# 且硬编码 executablePath=/usr/bin/chromium（与容器一致）。
+# 若你的发行版全局模块目录不同，用 `npm root -g` 校正此处。
+Environment=NODE_PATH=/usr/local/lib/node_modules
+ExecStart=/usr/bin/node /opt/arl-next/backend/app/tools/puppeteer_server.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

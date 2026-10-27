@@ -1,0 +1,21 @@
+[Unit]
+Description=ARL-Next Celery Workers, Beat & Scheduler (source deployment)
+Documentation=file:/opt/arl-next/deploy/source/README.md
+After=network-online.target mongod.service rabbitmq-server.service arl-web.service
+Wants=network-online.target
+Requires=mongod.service rabbitmq-server.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/arl-next/backend
+Environment=TZ=Asia/Shanghai
+Environment=PATH=/opt/arl-next/backend/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/opt/arl-next/deploy/source/start-worker.sh
+# 与容器 stop_grace_period: 1m 对齐：给正在执行的扫描任务留出优雅退出时间
+TimeoutStopSec=90
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

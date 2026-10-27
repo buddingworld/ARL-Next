@@ -1,0 +1,19 @@
+[Unit]
+Description=ARL-Next OSINT Service (ICP filing & enterprise recon, source deployment)
+Documentation=file:/opt/arl-next/deploy/source/README.md
+After=network-online.target mongod.service
+Wants=network-online.target
+Requires=mongod.service
+
+[Service]
+Type=simple
+# osint_service/utils.py 的 IPv6 地址池需要 CAP_NET_ADMIN（默认关闭，见 config.yml）
+User=root
+WorkingDirectory=/opt/arl-next/backend/osint_service
+Environment=TZ=Asia/Shanghai
+ExecStart=/opt/arl-next/backend/osint_service/.venv/bin/python icpApi.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

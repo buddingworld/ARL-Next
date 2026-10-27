@@ -1,0 +1,24 @@
+[Unit]
+Description=ARL-Next Web API (source deployment)
+Documentation=file:/opt/arl-next/deploy/source/README.md
+After=network-online.target mongod.service rabbitmq-server.service
+Wants=network-online.target
+Requires=mongod.service rabbitmq-server.service
+
+[Service]
+Type=simple
+# 与容器部署保持一致：nmap SYN 扫描与 massdns 均需要 raw socket 权限，
+# 非 root 运行会静默降级为 TCP connect 扫描甚至直接失败。
+# 如需降权运行，见 deploy/source/README.md「可选加固」一节。
+User=root
+WorkingDirectory=/opt/arl-next/backend
+Environment=TZ=Asia/Shanghai
+Environment=PATH=/opt/arl-next/backend/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# 幂等注入默认管理员账号；Mongo 未就绪时本步失败，Restart=always 会自动重试整轮启动
+ExecStartPre=/opt/arl-next/backend/.venv/bin/python inject_user.py
+ExecStart=/opt/arl-next/backend/.venv/bin/gunicorn --preload -b 127.0.0.1:5000 app.main:arl_app -w 4 --threads 4 --worker-class gthread -t 120 --max-requests 1000 --max-requests-jitter 50
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
