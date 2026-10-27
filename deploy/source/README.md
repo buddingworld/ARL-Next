@@ -8,17 +8,35 @@
 
 ## 一、开始之前：三件必须先知道的事
 
-### 1. 建议使用 Debian 12 (bookworm)
+### 1. 发行版支持与选择
 
-容器的基础镜像是 `python:3.13-slim-bookworm` 与 `debian:bookworm`，且 `backend/app/tools/puppeteer_server.js:102` **硬编码** `executablePath: '/usr/bin/chromium'`。
+`start-local.sh` 同时支持两类发行版，并已实测通过：
 
-Debian 12 的 `apt install chromium` 会真实安装到 `/usr/bin/chromium`；而 Ubuntu 的 `chromium` 是 snap 包装壳，路径行为不一致，需要额外折腾。**用 Debian 12 可以最大程度对齐容器内的路径假设，省掉一整类"找不到浏览器"的问题。**
+| 发行版族 | 实测环境 | 说明 |
+| :--- | :--- | :--- |
+| **dnf 系** | CentOS Stream 10 (x86_64, 1C/923MB) | 全流程实测通过，含扫描、截图、备案查询、监控调度 |
+| **apt 系** | Debian / Ubuntu | 走官方源与发行版包，路径与容器最接近 |
 
-### 2. 服务以 root 运行（与容器一致）
+**关于 Chromium 路径**：`backend/app/tools/puppeteer_server.js:102` **硬编码** `executablePath: '/usr/bin/chromium'`。各发行版的二进制位置不同——Debian 在 `/usr/bin/chromium`，EPEL 系在 `/usr/bin/chromium-browser`——脚本会自动创建软链补齐，无需手工处理。Ubuntu 的 `chromium` 是 snap 包装壳，路径行为不一致，建议改用 Debian 或 RHEL 系。
+
+### 2. RHEL / CentOS 系的 SELinux 注意事项
+
+若目标系统 SELinux 为 `Enforcing`（CentOS/RHEL 默认），脚本会自动处理以下四处，**手工部署时务必逐项确认**，否则会表现为「服务起不来但报错信息极具误导性」：
+
+| 现象 | 真实原因 | 处理 |
+| :--- | :--- | :--- |
+| `systemctl start mongod` 报 `203/EXEC` / `Permission denied` | 经 `/tmp` 解压再 `mv` 的二进制带有 `user_tmp_t` 上下文 | `chcon -R -t bin_t` + `semanage fcontext` |
+| `nginx -t` 报配置 `Permission denied` | 配置文件经 `/tmp` 中转，上下文为 `user_tmp_t` | 在目标目录内创建文件，再 `restorecon -F` |
+| nginx 启动失败 / 无法监听 5173 | `http_port_t` 默认不含 5173 | `semanage port -a -t http_port_t -p tcp 5173` |
+| 登录接口 **502 Bad Gateway** | `httpd_can_network_connect` 默认 `off`，nginx 不能反代本机后端 | `setsebool -P httpd_can_network_connect on` |
+
+另需将前端产物与证书目录标记为 `httpd_sys_content_t`（脚本已自动完成）。
+
+### 3. 服务以 root 运行（与容器一致）
 
 `nmap` 的 SYN 扫描与 `massdns` 的 DNS 发包都需要 **raw socket 权限**。容器内是 root，非 root 运行会导致 nmap 静默降级为 TCP connect 扫描（更慢、结果更少），massdns 则直接失败。降权方案见文末「可选加固」。
 
-### 3. Basic Auth 一键开关会失效（这是被低估的一项）
+### 4. Basic Auth 一键开关会失效（这是被低估的一项）
 
 顶部导航栏的 Basic Auth 开关，前端调的是 `/update_stream/auth_status`（`frontend/src/views/Layout.vue:868`），由 **updater 守护进程**提供——和"一键更新"是同一个服务。不部署 updater 后：
 
@@ -408,15 +426,36 @@ systemctl restart arl-web arl-worker arl-osint arl-puppeteer && systemctl reload
 
 ---
 
-## 九、验证状态声明
+## 九、验证状态
 
-本目录下的 systemd units、nginx 配置与启动脚本均**未在真实 Linux 服务器上端到端验证过**（编写环境为 Windows，无 Docker 与 WSL 发行版）。所有内容依据以下已入库的权威来源静态推导：
+**已在 CentOS Stream 10（x86_64，1 核 / 923MB 内存 / SELinux Enforcing）上完成端到端实测**，`start-local.sh` 全流程跑通：
 
-- 原生二进制与运行库清单：`Dockerfile.prod:1-96`
-- Chromium / Node 依赖与 `NODE_PATH`：`backend/Dockerfile.puppeteer`
-- 前端构建方式与 nginx 版本：`frontend/Dockerfile.prod`
-- nginx 网关规则：`frontend/default.conf.prod`
-- 进程编排与并发/OOM 策略：`backend/start_web_prod.sh`、`backend/start_worker_prod.sh`
-- 依赖服务参数：`docker-compose.prod.yml`
+- 环境体检 22 项全部 ✅
+- 7 个服务（arl-web / arl-worker / arl-osint / arl-puppeteer / nginx / mongod / rabbitmq-server）均 active 且 0 次重启
+- 经 nginx 网关登录成功，带 Token 调用任务列表 API 返回 200
+- Celery 三队列（arltask_heavy / arltask_light / arlgithub）全部 online 并响应 ping
+- 截图渲染服务返回 41KB base64 JPEG（Node + Chromium 链路完整）
+- nuclei 模板 14434 个、GeoIP ip2region 库经 sha256 校验落盘
 
-首次部署请按第五节逐步执行并核对每步输出，遇到偏差再针对性调整。跑通一遍后，可以把验证过的步骤固化成 `install-source.sh` 一键脚本。
+首次实测中暴露并已修复的问题（均已固化进脚本，详见 `git log`）：
+
+| # | 问题 | 修复 |
+| :--- | :--- | :--- |
+| 1 | 脚本硬拒绝非 apt 发行版 | 增加 dnf 系完整支持 |
+| 2 | MongoDB 7.0 仓库密钥 SHA1 自签名被加密策略拒绝 | 改用官方 tarball + SHA256 校验，不改动系统加密策略 |
+| 3 | `mongodb-org-tools` 依赖缺失导致整包安装失败 | 仅装 server + mongosh（备份功能本就不在范围内） |
+| 4 | mongod 二进制带 `user_tmp_t` 上下文，systemd 报 203/EXEC | `chcon` + `semanage fcontext` 修正 |
+| 5 | nginx 读配置文件 Permission denied | 目标目录内创建 + `restorecon` |
+| 6 | nginx 无法监听 5173 | `semanage port` 放行 |
+| 7 | 登录接口 502 | `setsebool -P httpd_can_network_connect on` |
+| 8 | worker 反复崩溃（`wait-for-it.sh` Permission denied） | 补齐执行位（该脚本会以 `timeout $0` 重执行自身） |
+| 9 | pip/npm 直连官方源连接重置 | 默认走国内镜像，失败回退官方源 |
+| 10 | 低内存机器 vite 构建 `Reached heap limit` | 按物理内存+Swap 动态放宽 Node 堆上限 |
+| 11 | nuclei 模板拉取失败（GitHub 被重置） | 自动探测本机 SOCKS5 代理重试 |
+| 12 | GeoIP 官方直链 SSL 重置、内置镜像返回损坏内容 | 增加镜像兜底通道并强制 sha256 校验 |
+| 13 | `--check-only` 会重启 MongoDB（违反只读契约） | 体检模式改为纯只读探测 |
+
+**apt 系路径尚未实测**（依据 Dockerfile 与发行版惯例推导），首次在 Debian/Ubuntu 上部署时建议先执行 `--check-only` 核对。
+
+> 提示：本节所述 1 核 / 923MB 属于**低于推荐配置**（README 建议 4 核 4G）的极端环境，能跑通依赖 2GB Swap。生产环境请按推荐配置规划。
+

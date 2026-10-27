@@ -38,8 +38,10 @@ ARL-Next 源码模式一键启动脚本
   2. 缺失的自动安装/生成；已存在的原样保留（配置与证书绝不覆盖）
   3. 启动全部服务并做健康探针校验
 
-注意: 本脚本目前仅支持 apt 系发行版（Debian / Ubuntu）。
-      RHEL / CentOS 请参照 deploy/source/README.md 手动部署。
+支持发行版: apt 系（Debian / Ubuntu）与 dnf 系（RHEL / CentOS / Rocky / AlmaLinux）
+境内网络: 默认使用国内镜像源（pip 走阿里云、npm 走 npmmirror）；
+          GitHub 相关下载（nuclei 模板、GeoIP）直连失败时会尝试镜像与
+          本机 SOCKS5 代理（自动探测 127.0.0.1:1080，或用 ARL_SOCKS_PROXY 指定）
 EOF
 }
 
@@ -109,6 +111,16 @@ MASSDNS_VERSION="1.1.0"
 NUCLEI_VERSION="3.11.0"
 PUPPETEER_CORE_VERSION="10.4.0"
 
+# 国内镜像源：直连官方源在境内常出现连接重置，故默认走镜像。
+# 需要改回官方源时置空对应环境变量即可，例如：ARL_PIP_INDEX= sudo bash start-local.sh
+PIP_INDEX_URL="${ARL_PIP_INDEX-https://mirrors.aliyun.com/pypi/simple/}"
+NPM_REGISTRY="${ARL_NPM_REGISTRY-https://registry.npmmirror.com}"
+
+# 境内访问 GitHub 常被重置（表现为 SSL UNEXPECTED_EOF 或镜像返回损坏内容）。
+# 若本机存在 SOCKS5 代理（如 ssh -D 1080），自动作为 GitHub 相关下载的兜底通道；
+# 也可用 ARL_SOCKS_PROXY=socks5://host:port 显式指定。
+SOCKS_PROXY="${ARL_SOCKS_PROXY-}"
+
 MISSING_ITEMS=()
 
 # ==================== 通用工具 ====================
@@ -167,14 +179,27 @@ run_cmd_with_timeout() {
     fi
 }
 
-# ==================== 包管理器探测 ====================
+# 探测本机 SOCKS5 代理（用于 GitHub 相关下载的兜底通道）
+detect_socks_proxy() {
+    [ -n "$SOCKS_PROXY" ] && return 0
+    if run_cmd_with_timeout 3 bash -c "</dev/tcp/127.0.0.1/1080" 2>/dev/null; then
+        SOCKS_PROXY="socks5://127.0.0.1:1080"
+    fi
+    [ -n "$SOCKS_PROXY" ]
+}
+
+# ==================== 发行版与包管理器探测 ====================
+# 同时支持 apt 系（Debian / Ubuntu）与 dnf 系（RHEL / CentOS / Rocky / AlmaLinux）
 detect_pkg_manager() {
     if have apt-get; then
+        OS_FAMILY="debian"
         PKG_MANAGER="apt-get"
-    elif have yum || have dnf; then
-        echo "❌ 错误：本脚本目前仅支持 apt 系发行版（Debian / Ubuntu）。"
-        echo "👉 检测到 RHEL 系包管理器，请参照 deploy/source/README.md 手动部署。"
-        exit 1
+    elif have dnf; then
+        OS_FAMILY="rhel"
+        PKG_MANAGER="dnf"
+    elif have yum; then
+        OS_FAMILY="rhel"
+        PKG_MANAGER="yum"
     else
         echo "❌ 错误：未识别的包管理器，请参照 deploy/source/README.md 手动部署。"
         exit 1
@@ -182,18 +207,41 @@ detect_pkg_manager() {
 }
 
 pkg_install() {
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@"
+    if [ "$OS_FAMILY" = "debian" ]; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@"
+    else
+        "$PKG_MANAGER" install -y "$@"
+    fi
+}
+
+# 探测 CPU 架构（Debian 用 dpkg，RHEL 用 uname，统一映射到 nuclei 的命名）
+detect_arch() {
+    local raw
+    if have dpkg; then
+        raw="$(dpkg --print-architecture 2>/dev/null)"
+    else
+        raw="$(uname -m 2>/dev/null)"
+    fi
+    case "$raw" in
+        amd64|x86_64)  echo "amd64" ;;
+        arm64|aarch64) echo "arm64" ;;
+        *)             echo "$raw" ;;
+    esac
 }
 
 # ==================== 1. 系统依赖与编译工具链 ====================
 check_and_install_base_packages() {
-    # 抽样探测：这些齐了就认为基础环境完整，跳过整个 apt 流程（避免每次 apt-get update 的开销）
+    # 抽样探测：这些齐了就认为基础环境完整，跳过整个包管理流程（避免每次刷元数据的开销）
     local missing=0
     local cmd
     for cmd in gcc make curl wget unzip bzip2 git openssl nginx; do
         have "$cmd" || missing=1
     done
-    dpkg -s libpcap-dev &>/dev/null || missing=1
+    if [ "$OS_FAMILY" = "debian" ]; then
+        dpkg -s libpcap-dev &>/dev/null || missing=1
+    else
+        rpm -q libpcap-devel &>/dev/null || missing=1
+    fi
     python3 -c "import venv" &>/dev/null || missing=1
 
     if [ $missing -eq 0 ]; then
@@ -201,18 +249,34 @@ check_and_install_base_packages() {
         return 0
     fi
 
-    report_miss "系统依赖与编译工具链（build-essential / libpcap-dev / nginx 等）"
+    report_miss "系统依赖与编译工具链（编译器 / libpcap 开发库 / nginx 等）"
     [ "$CHECK_ONLY" -eq 1 ] && return 0
 
-    run_with_spinner "更新软件包列表" apt-get update -o Acquire::Retries=10 || \
-        die "apt-get update 失败，请检查网络或软件源配置。"
+    if [ "$OS_FAMILY" = "debian" ]; then
+        run_with_spinner "更新软件包列表" apt-get update -o Acquire::Retries=10 || \
+            die "apt-get update 失败，请检查网络或软件源配置。"
 
-    run_with_spinner "安装系统依赖与编译工具链" pkg_install \
-        wget unzip bzip2 git curl tzdata ca-certificates \
-        make gcc g++ automake autoconf libtool python3-dev \
-        libxml2-dev libxslt1-dev zlib1g-dev libffi-dev libssl-dev libpcap-dev \
-        python3 python3-pip python3-venv openssl nginx \
-        || die "系统依赖安装失败，请查看上方报错信息。"
+        run_with_spinner "安装系统依赖与编译工具链" pkg_install \
+            wget unzip bzip2 git curl tzdata ca-certificates \
+            make gcc g++ automake autoconf libtool python3-dev \
+            libxml2-dev libxslt1-dev zlib1g-dev libffi-dev libssl-dev libpcap-dev \
+            python3 python3-pip python3-venv openssl nginx \
+            || die "系统依赖安装失败，请查看上方报错信息。"
+    else
+        # RHEL 系：libpcap-devel 位于 CRB 仓库，chromium 位于 EPEL，两者都需显式启用
+        run_with_spinner "启用 CRB 与 EPEL 仓库" bash -c "
+            dnf config-manager --set-enabled crb >/dev/null 2>&1 || true
+            rpm -q epel-release >/dev/null 2>&1 || dnf install -y epel-release >/dev/null 2>&1 || true
+            dnf makecache -y >/dev/null 2>&1 || true
+        " || echo "  ⚠️  仓库启用异常，继续尝试安装..."
+
+        run_with_spinner "安装系统依赖与编译工具链" pkg_install \
+            git gcc gcc-c++ make autoconf automake libtool \
+            python3-devel python3-pip \
+            libpcap-devel libxml2-devel libxslt-devel zlib-devel libffi-devel openssl-devel \
+            wget unzip bzip2 curl tzdata ca-certificates which procps-ng nginx \
+            || die "系统依赖安装失败，请查看上方报错信息。"
+    fi
 }
 
 # ==================== 2. massdns（无发行版包，需源码编译）====================
@@ -230,12 +294,13 @@ check_and_install_massdns() {
     if run_with_spinner "编译安装 massdns v$MASSDNS_VERSION" bash -c "
         set -e
         cd '$workdir'
-        wget -q -t 10 https://github.com/blechschmidt/massdns/archive/refs/tags/v${MASSDNS_VERSION}.tar.gz \
-          || wget -q -t 10 https://gh-proxy.com/https://github.com/blechschmidt/massdns/archive/refs/tags/v${MASSDNS_VERSION}.tar.gz
+        # 国内 gh-proxy 镜像优先，失败回退 GitHub 直连
+        wget -q -t 10 https://gh-proxy.com/https://github.com/blechschmidt/massdns/archive/refs/tags/v${MASSDNS_VERSION}.tar.gz \
+          || wget -q -t 10 https://github.com/blechschmidt/massdns/archive/refs/tags/v${MASSDNS_VERSION}.tar.gz
         tar xf v${MASSDNS_VERSION}.tar.gz
         cd massdns-${MASSDNS_VERSION}
         make -j\$(nproc)
-        cp bin/massdns /usr/local/bin/
+        install -m 0755 bin/massdns /usr/local/bin/
     "; then
         rm -rf "$workdir"
     else
@@ -269,7 +334,7 @@ check_and_install_nuclei() {
         report_miss "nuclei（PoC 扫描引擎）"
 
         local arch zip
-        arch="$(dpkg --print-architecture)"
+        arch="$(detect_arch)"
         case "$arch" in
             amd64) zip="nuclei_${NUCLEI_VERSION}_linux_amd64.zip" ;;
             arm64) zip="nuclei_${NUCLEI_VERSION}_linux_arm64.zip" ;;
@@ -281,11 +346,11 @@ check_and_install_nuclei() {
         if run_with_spinner "下载安装 nuclei v$NUCLEI_VERSION" bash -c "
             set -e
             cd '$workdir'
-            wget -q -t 10 'https://github.com/projectdiscovery/nuclei/releases/download/v${NUCLEI_VERSION}/${zip}' -O '${zip}' \
-              || wget -q -t 10 'https://gh-proxy.com/https://github.com/projectdiscovery/nuclei/releases/download/v${NUCLEI_VERSION}/${zip}' -O '${zip}'
+            # 国内 gh-proxy 镜像优先，失败回退 GitHub 直连
+            wget -q -t 10 'https://gh-proxy.com/https://github.com/projectdiscovery/nuclei/releases/download/v${NUCLEI_VERSION}/${zip}' -O '${zip}' \
+              || wget -q -t 10 'https://github.com/projectdiscovery/nuclei/releases/download/v${NUCLEI_VERSION}/${zip}' -O '${zip}'
             unzip -o -q '${zip}'
-            mv nuclei /usr/local/bin/
-            chmod +x /usr/local/bin/nuclei
+            install -m 0755 nuclei /usr/local/bin/
         "; then
             rm -rf "$workdir"
         else
@@ -306,8 +371,18 @@ check_and_install_nuclei() {
     report_miss "nuclei 模板库 ($tpl_dir)"
     [ "$CHECK_ONLY" -eq 1 ] && return 0
 
-    run_with_spinner "拉取 nuclei 模板库（体积较大，请耐心等待）" nuclei -update-templates \
-        || die "nuclei 模板拉取失败，请检查网络后重试。"
+    # 模板需从 GitHub 拉取，境内直连常被重置；失败后经本机 SOCKS5 代理重试
+    if ! run_with_spinner "拉取 nuclei 模板库（体积较大，请耐心等待）" nuclei -update-templates; then
+        if detect_socks_proxy; then
+            echo "  ⚠️  直连失败，改经 SOCKS5 代理（$SOCKS_PROXY）重试..."
+            run_with_spinner "经代理拉取 nuclei 模板库" \
+                env HTTPS_PROXY="$SOCKS_PROXY" HTTP_PROXY="$SOCKS_PROXY" nuclei -update-templates \
+                || echo "  ⚠️  nuclei 模板拉取失败，PoC 扫描能力将受限。"
+        else
+            echo "  ⚠️  nuclei 模板拉取失败，PoC 扫描能力将受限。"
+            echo "      如本机有 SOCKS5 代理，可执行：ARL_SOCKS_PROXY=socks5://127.0.0.1:1080 sudo bash start-local.sh"
+        fi
+    fi
 }
 
 # ==================== 5. Node.js / Chromium / puppeteer-core ====================
@@ -327,15 +402,35 @@ check_and_install_render_stack() {
     # puppeteer_server.js:102 硬编码 executablePath=/usr/bin/chromium，路径必须一致
     if [ -x /usr/bin/chromium ]; then
         report_ok "Chromium 已安装 ($(/usr/bin/chromium --version 2>/dev/null))"
+    elif [ -x /usr/bin/chromium-browser ]; then
+        # RHEL 系（EPEL）的二进制名为 chromium-browser，软链到硬编码路径即可
+        report_miss "Chromium 软链 /usr/bin/chromium（二进制已存在于 chromium-browser）"
+        if [ "$CHECK_ONLY" -eq 0 ]; then
+            ln -sf /usr/bin/chromium-browser /usr/bin/chromium
+            report_ok "已创建软链 /usr/bin/chromium -> /usr/bin/chromium-browser"
+        fi
     else
         report_miss "Chromium（站点截图渲染内核，需位于 /usr/bin/chromium）"
         if [ "$CHECK_ONLY" -eq 0 ]; then
-            run_with_spinner "安装 Chromium 与图形依赖库" pkg_install \
-                chromium libnss3 libatk-bridge2.0-0 libgtk-3-0 libx11-xcb1 libxcb-dri3-0 \
-                libxcomposite1 libxdamage1 libxrandr2 libgbm1 libasound2 \
-                libxshmfence1 libdrm2 libxkbcommon0 libatspi2.0-0 libcups2 \
-                fontconfig fonts-wqy-zenhei fonts-wqy-microhei \
-                || echo "  ⚠️  Chromium 安装失败，截图与 Web 指纹识别功能将不可用。"
+            if [ "$OS_FAMILY" = "debian" ]; then
+                run_with_spinner "安装 Chromium 与图形依赖库" pkg_install \
+                    chromium libnss3 libatk-bridge2.0-0 libgtk-3-0 libx11-xcb1 libxcb-dri3-0 \
+                    libxcomposite1 libxdamage1 libxrandr2 libgbm1 libasound2 \
+                    libxshmfence1 libdrm2 libxkbcommon0 libatspi2.0-0 libcups2 \
+                    fontconfig fonts-wqy-zenhei fonts-wqy-microhei \
+                    || echo "  ⚠️  Chromium 安装失败，截图与 Web 指纹识别功能将不可用。"
+            else
+                # RHEL 系：chromium 来自 EPEL，图形依赖由 dnf 自动解析
+                run_with_spinner "安装 Chromium 与中文字体" pkg_install \
+                    chromium fontconfig wqy-zenhei-fonts \
+                    || echo "  ⚠️  Chromium 安装失败，截图与 Web 指纹识别功能将不可用。"
+            fi
+
+            # 安装后补齐硬编码路径的软链
+            if [ ! -e /usr/bin/chromium ] && [ -x /usr/bin/chromium-browser ]; then
+                ln -sf /usr/bin/chromium-browser /usr/bin/chromium
+                report_ok "已创建软链 /usr/bin/chromium -> /usr/bin/chromium-browser"
+            fi
         fi
     fi
 
@@ -348,7 +443,7 @@ check_and_install_render_stack() {
         report_miss "puppeteer-core@$PUPPETEER_CORE_VERSION（全局 npm 包）"
         if [ "$CHECK_ONLY" -eq 0 ] && have npm; then
             run_with_spinner "安装 puppeteer-core@$PUPPETEER_CORE_VERSION" \
-                npm install -g "puppeteer-core@$PUPPETEER_CORE_VERSION" \
+                npm install -g --registry="$NPM_REGISTRY" "puppeteer-core@$PUPPETEER_CORE_VERSION" \
                 || echo "  ⚠️  puppeteer-core 安装失败，截图与 Web 指纹识别功能将不可用。"
         fi
     fi
@@ -377,11 +472,18 @@ prepare_venv() {
             || die "$label 虚拟环境创建失败（请确认已安装 python3-venv）。"
     fi
 
-    run_with_spinner "升级 $label pip" "$venv_dir/bin/pip" install --upgrade pip \
+    # 国内 PyPI 镜像优先；镜像不可用时自动回退官方源
+    local -a idx=()
+    [ -n "$PIP_INDEX_URL" ] && idx=(-i "$PIP_INDEX_URL")
+
+    run_with_spinner "升级 $label pip" "$venv_dir/bin/pip" install "${idx[@]}" --upgrade pip \
         || die "$label pip 升级失败。"
 
-    run_with_spinner "安装 $label Python 依赖" "$venv_dir/bin/pip" install -r "$req_file" \
-        || die "$label Python 依赖安装失败，请查看上方报错信息。"
+    if ! run_with_spinner "安装 $label Python 依赖" "$venv_dir/bin/pip" install "${idx[@]}" -r "$req_file"; then
+        echo "  ⚠️  国内镜像安装失败，回退官方 PyPI 重试..."
+        run_with_spinner "安装 $label Python 依赖（官方源）" "$venv_dir/bin/pip" install -r "$req_file" \
+            || die "$label Python 依赖安装失败，请查看上方报错信息。"
+    fi
 }
 
 # 戳记须在全部安装步骤成功后才写入，避免半成品被误判为已就绪
@@ -401,11 +503,15 @@ check_and_setup_python_envs() {
             prepare_venv "$VENV" "$BACKEND_DIR/requirements.txt" "后端"
 
             # 对齐 Dockerfile.prod:73-79：setuptools 固定 <70.0.0，
-            # 并用 --no-build-isolation 让该固定版本对 ARL-NPoC 的 editable 构建真正生效
+            # 并用 --no-build-isolation 让该固定版本对 ARL-NPoC 的 editable 构建真正生效。
+            # 注意：本步同样必须带镜像参数，否则会退回官方 PyPI 而触发连接重置。
+            local idx_flag=""
+            [ -n "$PIP_INDEX_URL" ] && idx_flag="-i $PIP_INDEX_URL"
+
             run_with_spinner "安装 ARL-NPoC（editable）" bash -c "
                 set -e
-                '$VENV/bin/pip' install 'setuptools<70.0.0' wheel
-                '$VENV/bin/pip' install --no-build-isolation -e '$BACKEND_DIR/ARL-NPoC/'
+                '$VENV/bin/pip' install $idx_flag 'setuptools<70.0.0' wheel
+                '$VENV/bin/pip' install $idx_flag --no-build-isolation -e '$BACKEND_DIR/ARL-NPoC/'
             " || die "ARL-NPoC 安装失败。"
 
             mark_venv_current "$VENV" "$BACKEND_DIR/requirements.txt"
@@ -425,10 +531,138 @@ check_and_setup_python_envs() {
 }
 
 # ==================== 7. MongoDB ====================
+MONGO_VERSION="7.0.45"
+
+# 用后端 venv 的 pymongo 探测（不依赖 mongosh —— RHEL 系未必装得上）
 mongo_ready() {
-    have mongosh || return 1
-    run_cmd_with_timeout 5 mongosh "mongodb://$MONGO_USER:$MONGO_PASS@127.0.0.1:27017/?authSource=admin" \
-        --quiet --eval 'db.runCommand({ping:1}).ok' 2>/dev/null | grep -q 1
+    [ -x "$VENV/bin/python" ] || return 1
+    run_cmd_with_timeout 20 "$VENV/bin/python" - <<PY 2>/dev/null
+import sys
+try:
+    from pymongo import MongoClient
+    MongoClient("mongodb://$MONGO_USER:$MONGO_PASS@127.0.0.1:27017/?authSource=admin",
+                serverSelectionTimeoutMS=8000).admin.command("ping")
+except Exception:
+    sys.exit(1)
+sys.exit(0)
+PY
+}
+
+# 幂等创建管理员账号：已存在则跳过，未启用鉴权时免密创建
+create_mongo_user() {
+    "$VENV/bin/python" - <<PY
+import sys
+from pymongo import MongoClient
+
+# 已启用鉴权且账号存在的情况
+try:
+    MongoClient("mongodb://$MONGO_USER:$MONGO_PASS@127.0.0.1:27017/?authSource=admin",
+                serverSelectionTimeoutMS=8000).admin.command("ping")
+    print("EXISTS")
+    sys.exit(0)
+except Exception:
+    pass
+
+# 未启用鉴权时免密创建
+try:
+    c = MongoClient("mongodb://127.0.0.1:27017/?directConnection=true",
+                    serverSelectionTimeoutMS=8000)
+    c.admin.command("createUser", "$MONGO_USER", pwd="$MONGO_PASS",
+                    roles=[{"role": "root", "db": "admin"}])
+    print("CREATED")
+except Exception as exc:
+    print("FAILED: %s" % exc)
+    sys.exit(1)
+PY
+}
+
+# RHEL 系走官方 tarball：绕开 MongoDB 7.0 仓库密钥的 SHA1 自签名被现代加密策略拒绝的问题，
+# 改用 HTTPS + 官方 SHA256 强校验，安全性不低于 RPM GPG，且不改动系统加密策略
+install_mongodb_tarball() {
+    local dist="rhel90"
+    local tgz="mongodb-linux-x86_64-${dist}-${MONGO_VERSION}.tgz"
+    local base="https://fastdl.mongodb.org/linux"
+    local prefix="/usr/local/mongodb"
+
+    run_with_spinner "下载 MongoDB $MONGO_VERSION（$dist）" bash -c "
+        set -e
+        cd /tmp
+        rm -f '$tgz' '$tgz.sha256'
+        curl -fSL -m 900 -o '$tgz' '$base/$tgz'
+        curl -fSL -m 60 -o '$tgz.sha256' '$base/$tgz.sha256'
+    " || die "MongoDB 下载失败，请检查网络能否访问 fastdl.mongodb.org。"
+
+    local expected actual
+    expected="$(awk '{print $1}' "/tmp/$tgz.sha256")"
+    actual="$(sha256sum "/tmp/$tgz" | awk '{print $1}')"
+    if [ "$expected" != "$actual" ]; then
+        die "MongoDB 安装包 SHA256 校验失败（期望 $expected / 实际 $actual），已中止安装。"
+    fi
+    echo "  ✅ MongoDB 安装包 SHA256 校验通过"
+
+    run_with_spinner "解压安装 MongoDB 到 $prefix" bash -c "
+        set -e
+        rm -rf /tmp/mongo_extract '$prefix'
+        mkdir -p /tmp/mongo_extract
+        tar xzf '/tmp/$tgz' -C /tmp/mongo_extract
+        src=\$(find /tmp/mongo_extract -maxdepth 1 -type d -name 'mongodb-*' | head -1)
+        [ -n \"\$src\" ] || exit 1
+        mv \"\$src\" '$prefix'
+        ln -sf '$prefix/bin/mongod' /usr/local/bin/mongod
+        rm -rf /tmp/mongo_extract '/tmp/$tgz' '/tmp/$tgz.sha256'
+    " || die "MongoDB 解压安装失败。"
+
+    # SELinux：经 /tmp 解压再 mv 会带入 user_tmp_t 上下文，systemd 会以 203/EXEC 拒绝执行
+    if have getenforce && [ "$(getenforce 2>/dev/null)" != "Disabled" ]; then
+        chcon -R -t bin_t "$prefix/bin" 2>/dev/null || true
+        run_cmd_with_timeout 30 semanage fcontext -a -t bin_t "$prefix/bin(/.*)?" >/dev/null 2>&1 || true
+        echo "  ✅ 已修正 SELinux 上下文为 bin_t（避免 systemd 203/EXEC）"
+    fi
+
+    # 运行用户与目录
+    id mongod >/dev/null 2>&1 || useradd -r -s /sbin/nologin -d /var/lib/mongo mongod
+    mkdir -p /var/lib/mongo /var/log/mongodb
+    # 清掉可能由 root 手动运行 mongod 留下的日志文件（属主为 root 时 mongod 用户无权写入）
+    rm -f /var/log/mongodb/mongod.log
+    chown -R mongod:mongod /var/lib/mongo /var/log/mongodb
+    chmod 755 /var/lib/mongo /var/log/mongodb
+
+    cat > /etc/mongod.conf <<'EOF'
+storage:
+  dbPath: /var/lib/mongo
+systemLog:
+  destination: file
+  logAppend: true
+  path: /var/log/mongodb/mongod.log
+net:
+  port: 27017
+  bindIp: 127.0.0.1
+processManagement:
+  timeZoneInfo: /usr/share/zoneinfo
+EOF
+
+    # Type=simple 而非 forking+--fork：日志直接进 journald，且避免 fork 后子进程失败被漏判
+    cat > /etc/systemd/system/mongod.service <<'EOF'
+[Unit]
+Description=MongoDB Database Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=mongod
+Group=mongod
+Type=simple
+ExecStart=/usr/local/bin/mongod --config /etc/mongod.conf
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=64000
+LimitNPROC=64000
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
 }
 
 check_and_setup_mongodb() {
@@ -436,25 +670,47 @@ check_and_setup_mongodb() {
         report_miss "MongoDB 7.0"
         [ "$CHECK_ONLY" -eq 1 ] && return 0
 
-        run_with_spinner "导入 MongoDB 官方软件源" bash -c "
-            set -e
-            curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc \
-                | gpg -o /usr/share/keyrings/mongodb-server-7.0.gpg --dearmor
-            echo 'deb [ signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] http://repo.mongodb.org/apt/debian bookworm/mongodb-org/7.0 main' \
-                > /etc/apt/sources.list.d/mongodb-org-7.0.list
-            apt-get update -o Acquire::Retries=10
-        " || die "MongoDB 软件源导入失败，请检查网络。"
+        if [ "$OS_FAMILY" = "debian" ]; then
+            run_with_spinner "导入 MongoDB 官方软件源" bash -c "
+                set -e
+                curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc \
+                    | gpg -o /usr/share/keyrings/mongodb-server-7.0.gpg --dearmor
+                echo 'deb [ signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] http://repo.mongodb.org/apt/debian bookworm/mongodb-org/7.0 main' \
+                    > /etc/apt/sources.list.d/mongodb-org-7.0.list
+                apt-get update -o Acquire::Retries=10
+            " || die "MongoDB 软件源导入失败，请检查网络。"
 
-        run_with_spinner "安装 MongoDB 7.0" pkg_install mongodb-org \
-            || die "MongoDB 安装失败。"
+            # 只装 server 与 shell：mongodb-org-tools 依赖缺失的 mongodb-database-tools，
+            # 且备份功能不在源码模式范围内
+            run_with_spinner "安装 MongoDB 7.0" pkg_install mongodb-org-server mongodb-mongosh \
+                || die "MongoDB 安装失败。"
+        else
+            install_mongodb_tarball
+        fi
     else
         report_ok "MongoDB 已安装"
     fi
 
+    # 体检模式：只读探测，绝不重启服务或改动配置
+    if [ "$CHECK_ONLY" -eq 1 ]; then
+        if systemctl is-active --quiet mongod 2>/dev/null; then
+            report_ok "MongoDB 服务运行中"
+        else
+            report_miss "MongoDB 服务未运行"
+        fi
+        if grep -qE '^[[:space:]]*authorization[[:space:]]*:[[:space:]]*enabled' /etc/mongod.conf 2>/dev/null; then
+            report_ok "MongoDB 鉴权已启用"
+        else
+            report_miss "MongoDB 鉴权未启用（security.authorization）"
+        fi
+        return 0
+    fi
+
     run_with_spinner "启动 MongoDB 服务" bash -c "
         systemctl enable mongod >/dev/null 2>&1
+        systemctl reset-failed mongod >/dev/null 2>&1 || true
         systemctl restart mongod
-    " || die "MongoDB 启动失败，请执行 'journalctl -u mongod' 排查。"
+    " || die "MongoDB 启动失败，请执行 'journalctl -u mongod -n 50' 排查。"
 
     # 等待端口就绪
     local i
@@ -465,27 +721,8 @@ check_and_setup_mongodb() {
         sleep 1
     done
 
-    if [ "$CHECK_ONLY" -eq 1 ]; then
-        if grep -qE '^[[:space:]]*authorization[[:space:]]*:[[:space:]]*enabled' /etc/mongod.conf 2>/dev/null; then
-            report_ok "MongoDB 鉴权已启用"
-        else
-            report_miss "MongoDB 鉴权未启用（security.authorization）"
-        fi
-        return 0
-    fi
-
     # 幂等创建管理员账号（对应容器的 MONGO_INITDB_ROOT_USERNAME/PASSWORD=admin）
-    # 未启用鉴权时免密即可创建；已启用且账号已存在时本步静默跳过，由末尾探针兜底校验
-    run_with_spinner "确保 MongoDB 管理员账号存在" bash -c "
-        mongosh --quiet --eval '
-            const a = db.getSiblingDB(\"admin\");
-            if (!a.getUser(\"$MONGO_USER\")) {
-                a.createUser({user: \"$MONGO_USER\", pwd: \"$MONGO_PASS\",
-                              roles: [{role: \"root\", db: \"admin\"}]});
-                print(\"created\");
-            } else { print(\"exists\"); }
-        ' 2>/dev/null || true
-    " || true
+    run_with_spinner "确保 MongoDB 管理员账号存在" create_mongo_user || true
 
     # 启用鉴权：仅在确无 security 节点时追加，绝不改写已有配置
     if grep -qE '^[[:space:]]*authorization[[:space:]]*:[[:space:]]*enabled' /etc/mongod.conf 2>/dev/null; then
@@ -511,18 +748,36 @@ check_and_setup_mongodb() {
     else
         echo "  ⚠️  MongoDB 已启动，但用默认凭据连接失败。"
         echo "      若你在 backend/config.yaml 中自定义过账号密码，请忽略本条；"
-        echo "      否则请执行 'mongosh' 后手动创建："
-        echo "      db.getSiblingDB(\"admin\").createUser({user:\"$MONGO_USER\", pwd:\"$MONGO_PASS\", roles:[{role:\"root\", db:\"admin\"}]})"
+        echo "      否则请手动创建："
+        echo "      mongosh --eval 'db.getSiblingDB(\"admin\").createUser({user:\"$MONGO_USER\",pwd:\"$MONGO_PASS\",roles:[{role:\"root\",db:\"admin\"}]})'"
     fi
 }
 
 # ==================== 8. RabbitMQ ====================
 check_and_setup_rabbitmq() {
-    if have rabbitmq-server || dpkg -s rabbitmq-server &>/dev/null; then
+    local installed=0
+    if have rabbitmq-server; then
+        installed=1
+    elif [ "$OS_FAMILY" = "debian" ] && dpkg -s rabbitmq-server &>/dev/null; then
+        installed=1
+    elif [ "$OS_FAMILY" = "rhel" ] && rpm -q rabbitmq-server &>/dev/null; then
+        installed=1
+    fi
+
+    if [ $installed -eq 1 ]; then
         report_ok "RabbitMQ 已安装"
     else
         report_miss "RabbitMQ（Celery 消息队列）"
         [ "$CHECK_ONLY" -eq 1 ] && return 0
+
+        if [ "$OS_FAMILY" = "rhel" ]; then
+            # RHEL 系基础源不含 RabbitMQ，需启用 CentOS Messaging SIG 仓库
+            # （RabbitMQ 官方 Cloudsmith 源目前无 el10 路径，直接返回 404）
+            run_with_spinner "启用 RabbitMQ 仓库（CentOS Messaging SIG）" bash -c "
+                rpm -q centos-release-rabbitmq-4 >/dev/null 2>&1 || dnf install -y centos-release-rabbitmq-4
+            " || die "RabbitMQ 仓库启用失败。"
+        fi
+
         run_with_spinner "安装 RabbitMQ" pkg_install rabbitmq-server || die "RabbitMQ 安装失败。"
     fi
 
@@ -571,6 +826,57 @@ check_and_setup_rabbitmq() {
 }
 
 # ==================== 9. GeoIP 数据 ====================
+# GeoIP 兜底下载：官方直链（raw.githubusercontent.com）境内会被 SSL 重置，
+# 脚本内置镜像 ghproxy.cn 实测会返回损坏内容（sha256 不匹配），
+# 因此按「gh-proxy.com → jsDelivr → 本机 SOCKS5 代理」重试，
+# 且每个通道都必须通过 GEOIP_VERSIONS.json 里的 sha256 强校验才落盘。
+fetch_geoip_fallback() {
+    local geoip_dir="$1"
+    local name="ip2region_v4.xdb"
+    local meta_file="$geoip_dir/GEOIP_VERSIONS.json"
+    local dest="$geoip_dir/$name"
+
+    [ -f "$meta_file" ] || return 1
+
+    local raw_url expect_sha
+    raw_url=$(python3 -c "import json;print(json.load(open('$meta_file'))['$name']['url'])" 2>/dev/null) || return 1
+    expect_sha=$(python3 -c "import json;print(json.load(open('$meta_file'))['$name']['sha256'])" 2>/dev/null) || return 1
+    [ -n "$raw_url" ] && [ -n "$expect_sha" ] || return 1
+
+    local tmp
+    tmp="$(mktemp)"
+
+    local -a urls=(
+        "https://gh-proxy.com/$raw_url"
+        "https://cdn.jsdelivr.net/gh/lionsoul2014/ip2region@master/data/$name"
+    )
+
+    local url
+    for url in "${urls[@]}"; do
+        rm -f "$tmp"
+        if run_cmd_with_timeout 300 curl -fSL -o "$tmp" "$url" 2>/dev/null \
+           && [ "$(sha256sum "$tmp" 2>/dev/null | awk '{print $1}')" = "$expect_sha" ]; then
+            mv -f "$tmp" "$dest"
+            echo "  ✅ GeoIP 经镜像下载并通过 sha256 校验"
+            return 0
+        fi
+    done
+
+    if detect_socks_proxy; then
+        rm -f "$tmp"
+        if run_cmd_with_timeout 300 curl -fSL --socks5-hostname "${SOCKS_PROXY#socks5://}" \
+               -o "$tmp" "$raw_url" 2>/dev/null \
+           && [ "$(sha256sum "$tmp" 2>/dev/null | awk '{print $1}')" = "$expect_sha" ]; then
+            mv -f "$tmp" "$dest"
+            echo "  ✅ GeoIP 经 SOCKS5 代理下载并通过 sha256 校验"
+            return 0
+        fi
+    fi
+
+    rm -f "$tmp"
+    return 1
+}
+
 check_and_fetch_geoip() {
     local geoip_dir="$BACKEND_DIR/GeoLite2"
 
@@ -591,10 +897,20 @@ check_and_fetch_geoip() {
         return 0
     fi
 
-    # 不阻断部署：ip2region 拉取失败时服务仍以降级模式运行
-    run_with_spinner "获取 GeoIP 数据库" \
-        python3 "$REPO_DIR/tools/fetch_geoip.py" --dir "$geoip_dir" \
-        || echo "  ⚠️  GeoIP 获取失败，不阻断部署（归属地解析将降级）。"
+    # 先走脚本自带逻辑（官方直链 + 内置镜像）
+    if run_with_spinner "获取 GeoIP 数据库" \
+        python3 "$REPO_DIR/tools/fetch_geoip.py" --dir "$geoip_dir"; then
+        return 0
+    fi
+
+    # 不阻断部署：兜底通道也失败时服务仍以降级模式运行
+    echo "  ⚠️  官方源获取失败（境内常见 SSL 重置），尝试镜像兜底通道..."
+    if fetch_geoip_fallback "$geoip_dir"; then
+        return 0
+    fi
+
+    echo "  ⚠️  GeoIP 获取失败，不阻断部署（归属地解析将降级）。"
+    echo "      如本机有 SOCKS5 代理，可执行：ARL_SOCKS_PROXY=socks5://127.0.0.1:1080 sudo bash start-local.sh"
 }
 
 # ==================== 10. 主机名别名 ====================
@@ -667,25 +983,39 @@ check_and_build_frontend() {
     have node || die "未安装 Node.js，无法构建前端。"
     have npm || die "未安装 npm，无法构建前端。"
 
+    # Node 会按物理内存推导默认堆上限，低内存机器上压得极低
+    # （实测 923MB 内存 → 474MB 上限），vite 构建会报 "Reached heap limit" 直接失败——
+    # 且因为是 V8 自限而非系统 OOM，dmesg 里查不到任何记录，极易误判为系统内存不足。
+    # 这里按「物理内存 + Swap」的一半放宽堆上限，让构建能借 Swap 跑完。
+    local total_mb swap_mb heap_mb
+    total_mb=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')
+    swap_mb=$(free -m 2>/dev/null | awk '/^Swap:/{print $2}')
+    heap_mb=$(( ( ${total_mb:-2048} + ${swap_mb:-0} ) / 2 ))
+    [ "$heap_mb" -lt 1024 ] && heap_mb=1024
+    [ "$heap_mb" -gt 4096 ] && heap_mb=4096
+    export NODE_OPTIONS="--max-old-space-size=$heap_mb"
+    echo "  ℹ️  前端构建堆上限设为 ${heap_mb}MB（物理内存 ${total_mb:-?}MB + Swap ${swap_mb:-0}MB）"
+
     # 与 frontend/Dockerfile.prod 一致：使用 pnpm 与 lockfile 冻结安装
     if ! have pnpm; then
-        run_with_spinner "安装 pnpm@9" npm install -g pnpm@9 || die "pnpm 安装失败。"
+        run_with_spinner "安装 pnpm@9" npm install -g --registry="$NPM_REGISTRY" pnpm@9 \
+            || die "pnpm 安装失败。"
     fi
 
     if [ -f "$FRONTEND_DIR/pnpm-lock.yaml" ]; then
         run_with_spinner "安装前端依赖（pnpm，冻结 lockfile）" \
-            bash -c "cd '$FRONTEND_DIR' && pnpm install --frozen-lockfile" \
+            bash -c "cd '$FRONTEND_DIR' && pnpm install --frozen-lockfile --registry='$NPM_REGISTRY'" \
             || die "前端依赖安装失败。"
     else
         run_with_spinner "安装前端依赖（pnpm）" \
-            bash -c "cd '$FRONTEND_DIR' && pnpm install" \
+            bash -c "cd '$FRONTEND_DIR' && pnpm install --registry='$NPM_REGISTRY'" \
             || die "前端依赖安装失败。"
     fi
 
     # prebuild 会把 mcp-server/server.py 复制进 public/mcp，随 vite build 一并产出
     run_with_spinner "构建前端产物（含 .gz 预压缩）" \
         bash -c "cd '$FRONTEND_DIR' && pnpm run build" \
-        || die "前端构建失败。"
+        || die "前端构建失败。若报 'Reached heap limit'，请增大 Swap 后重试（构建需要约 1GB 可用内存）。"
 
     [ -f "$FRONTEND_DIR/dist/index.html" ] || die "前端构建完成但未找到 frontend/dist/index.html。"
 }
@@ -718,13 +1048,49 @@ render_template() {
     sed "s|/opt/arl-next|${REPO_DIR//&/\\&}|g" "$1"
 }
 
-check_and_setup_nginx() {
-    local rendered
-    rendered="$(mktemp)"
-    render_template "$SRC_DIR/nginx-arl.conf" > "$rendered"
+# SELinux 是否处于强制模式（决定是否需要打标签/放行端口）
+selinux_enforcing() {
+    have getenforce && [ "$(getenforce 2>/dev/null)" = "Enforcing" ]
+}
 
-    if [ -f "$NGINX_CONF_DEST" ] && cmp -s "$rendered" "$NGINX_CONF_DEST"; then
-        rm -f "$rendered"
+# RHEL 系 SELinux 放行：nginx 受 httpd_t 约束，需显式允许非标准端口与内容目录，
+# 否则表现为「配置语法 ok 但服务起不来」，且报错只有一句 Permission denied，极易误判为权限位问题
+configure_selinux_for_nginx() {
+    selinux_enforcing || return 0
+
+    # 1. 放行 nginx 绑定 5173（http_port_t 默认只含 80/81/443/488/8008/8009/8443/9000）
+    run_cmd_with_timeout 30 semanage port -a -t http_port_t -p tcp 5173 2>/dev/null \
+        || run_cmd_with_timeout 30 semanage port -m -t http_port_t -p tcp 5173 2>/dev/null \
+        || true
+
+    # 2. 前端产物与证书目录需标记为 httpd 可读（默认 usr_t 会被拒绝）
+    run_cmd_with_timeout 30 semanage fcontext -a -t httpd_sys_content_t \
+        "$FRONTEND_DIR/dist(/.*)?" >/dev/null 2>&1 || true
+    run_cmd_with_timeout 30 semanage fcontext -a -t httpd_sys_content_t \
+        "$REPO_DIR/ssl-certs(/.*)?" >/dev/null 2>&1 || true
+    restorecon -R "$FRONTEND_DIR/dist" "$REPO_DIR/ssl-certs" >/dev/null 2>&1 || true
+
+    # 3. 允许 nginx 反向代理到本机后端。
+    #    默认 httpd_can_network_connect=off，表现为 502 Bad Gateway，
+    #    且 nginx error.log 里只有一句 connect() failed (13: Permission denied)，极易误判为后端没起。
+    if ! run_cmd_with_timeout 30 getsebool httpd_can_network_connect 2>/dev/null | grep -q "on$"; then
+        run_cmd_with_timeout 30 setsebool -P httpd_can_network_connect on >/dev/null 2>&1 || true
+        echo "  ✅ 已放行 SELinux httpd_can_network_connect（nginx 反向代理后端）"
+    fi
+
+    echo "  ✅ 已配置 SELinux：放行 5173 端口并标记前端产物/证书目录"
+}
+
+check_and_setup_nginx() {
+    # 注意：暂存文件必须建在目标目录内再 mv。
+    # 若用 mktemp 建在 /tmp 再 mv 过去，文件会带着 user_tmp_t 上下文，
+    # nginx 以 httpd_t 读取时会报 Permission denied 而无法启动。
+    local staged="$NGINX_CONF_DEST.new"
+
+    render_template "$SRC_DIR/nginx-arl.conf" > "$staged"
+
+    if [ -f "$NGINX_CONF_DEST" ] && cmp -s "$staged" "$NGINX_CONF_DEST"; then
+        rm -f "$staged"
         report_ok "Nginx 网关配置已是最新"
     else
         if [ ! -f "$NGINX_CONF_DEST" ]; then
@@ -734,46 +1100,55 @@ check_and_setup_nginx() {
         fi
 
         if [ "$CHECK_ONLY" -eq 1 ]; then
-            rm -f "$rendered"
+            rm -f "$staged"
             return 0
         fi
 
         if [ -f "$NGINX_CONF_DEST" ]; then
             cp -f "$NGINX_CONF_DEST" "$NGINX_CONF_DEST.bak_$(date +%Y%m%d%H%M%S)"
         fi
-        mv -f "$rendered" "$NGINX_CONF_DEST"
+        mv -f "$staged" "$NGINX_CONF_DEST"
+        restorecon -F "$NGINX_CONF_DEST" >/dev/null 2>&1 || true
         report_ok "已安装 Nginx 网关配置"
     fi
 
     [ "$CHECK_ONLY" -eq 1 ] && return 0
 
+    configure_selinux_for_nginx
+
     run_with_spinner "校验 Nginx 配置语法" nginx -t || die "Nginx 配置校验失败，请检查上方报错。"
 
+    # nginx 未运行时 start 即生效；已在运行时 reload 平滑加载
     run_with_spinner "启动并重载 Nginx" bash -c "
         systemctl enable nginx >/dev/null 2>&1
-        systemctl start nginx 2>/dev/null || true
-        systemctl reload nginx
-    " || die "Nginx 启动/重载失败。"
+        systemctl reset-failed nginx >/dev/null 2>&1 || true
+        if systemctl is-active --quiet nginx; then
+            systemctl reload nginx
+        else
+            systemctl start nginx
+        fi
+    " || die "Nginx 启动失败，请执行 'journalctl -u nginx -n 30' 排查。"
 }
 
 # ==================== 15. systemd 服务单元 ====================
 check_and_setup_units() {
     local changed=0
-    local unit unit_file rendered
+    local unit unit_file staged
 
     for unit in "${ARL_UNITS[@]}"; do
         unit_file="$SYSTEMD_DIR/$unit.service"
-        rendered="$(mktemp)"
-        render_template "$SRC_DIR/$unit.service" > "$rendered"
+        # 同样在目标目录内暂存再 mv，避免带入 /tmp 的 SELinux 上下文
+        staged="$unit_file.new"
+        render_template "$SRC_DIR/$unit.service" > "$staged"
 
-        if [ -f "$unit_file" ] && cmp -s "$rendered" "$unit_file"; then
-            rm -f "$rendered"
+        if [ -f "$unit_file" ] && cmp -s "$staged" "$unit_file"; then
+            rm -f "$staged"
             continue
         fi
 
         changed=1
         if [ "$CHECK_ONLY" -eq 1 ]; then
-            rm -f "$rendered"
+            rm -f "$staged"
             report_miss "systemd 服务单元 $unit.service"
             continue
         fi
@@ -781,7 +1156,8 @@ check_and_setup_units() {
         if [ -f "$unit_file" ]; then
             cp -f "$unit_file" "$unit_file.bak_$(date +%Y%m%d%H%M%S)"
         fi
-        mv -f "$rendered" "$unit_file"
+        mv -f "$staged" "$unit_file"
+        restorecon -F "$unit_file" >/dev/null 2>&1 || true
         report_ok "已安装 systemd 服务单元 $unit.service"
     done
 
@@ -793,8 +1169,12 @@ check_and_setup_units() {
 
     [ "$CHECK_ONLY" -eq 1 ] && return 0
 
-    # 确保 worker 启动脚本可执行
-    chmod +x "$SRC_DIR/start-worker.sh" 2>/dev/null || true
+    # 确保脚本可执行：
+    # - start-worker.sh 由 systemd 直接调用
+    # - wait-for-it.sh 在仓库中是 100644，而它内部会以 `timeout $0 --child ...` 重新执行自身，
+    #   缺少执行位会导致 "Permission denied" 使 worker 反复崩溃重启
+    #   （容器内由 Dockerfile 显式 chmod +x，源码模式必须在此补齐）
+    chmod +x "$SRC_DIR/start-worker.sh" "$BACKEND_DIR/wait-for-it.sh" 2>/dev/null || true
 }
 
 # ==================== 16. 启动服务 ====================
