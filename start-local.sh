@@ -1032,6 +1032,114 @@ fix_stale_config_paths() {
     echo "      （原文件已备份为 $(basename "$conf").bak_*）"
 }
 
+# 把 config.yaml.example 中新增、而运行时 config.yaml 缺失的 QUERY_PLUGIN 插件补进去。
+#
+# 上游每新增一个域名收集插件都会踩这个坑：backend/config.yaml 被 .gitignore 忽略、
+# 脚本又坚持绝不覆盖它，于是新插件永远进不了运行时配置——表现为界面上看不到插件卡片，
+# 且 API 返回的 query_plugin_config 里压根没有这一项。
+# 此处只做「追加缺失项」：不触碰任何已有插件的配置，改动前先备份。
+merge_missing_query_plugins() {
+    local conf="$BACKEND_DIR/config.yaml"
+    local example="$BACKEND_DIR/config.yaml.example"
+
+    [ -f "$conf" ] || return 0
+    [ -f "$example" ] || return 0
+    have python3 || return 0
+
+    local added
+    added="$(python3 - "$conf" "$example" <<'PY'
+import io
+import re
+import shutil
+import sys
+import time
+
+conf_path, example_path = sys.argv[1], sys.argv[2]
+
+PLUGIN_RE = re.compile(r'^  ([A-Za-z0-9_]+)\s*:')
+TOP_RE = re.compile(r'^\S')
+
+
+def section_bounds(lines):
+    """返回 QUERY_PLUGIN 段的 [start, end) 行号；找不到返回 (None, None)。"""
+    start = None
+    for i, line in enumerate(lines):
+        if re.match(r'^QUERY_PLUGIN\s*:', line):
+            start = i + 1
+            break
+    if start is None:
+        return None, None
+    end = len(lines)
+    for j in range(start, len(lines)):
+        if TOP_RE.match(lines[j]):
+            end = j
+            break
+    return start, end
+
+
+def plugin_names(lines, start, end):
+    names = []
+    for line in lines[start:end]:
+        match = PLUGIN_RE.match(line)
+        if match:
+            names.append(match.group(1))
+    return names
+
+
+def plugin_block(lines, start, end, name):
+    """取出某个插件的完整文本块（含其子键与注释），去掉尾部空行。"""
+    out, started = [], False
+    for line in lines[start:end]:
+        match = PLUGIN_RE.match(line)
+        if match and match.group(1) == name:
+            started = True
+            out.append(line)
+            continue
+        if started:
+            if match:
+                break
+            out.append(line)
+    while out and not out[-1].strip():
+        out.pop()
+    return out
+
+
+conf = io.open(conf_path, encoding='utf-8').read().splitlines()
+example = io.open(example_path, encoding='utf-8').read().splitlines()
+
+c_start, c_end = section_bounds(conf)
+e_start, e_end = section_bounds(example)
+if c_start is None or e_start is None:
+    sys.exit(0)
+
+existing = set(plugin_names(conf, c_start, c_end))
+missing = [n for n in plugin_names(example, e_start, e_end) if n not in existing]
+if not missing:
+    sys.exit(0)
+
+# 插到该段最后一个非空行之后，避免把空行/注释挤散
+insert_at = c_end
+while insert_at > c_start and not conf[insert_at - 1].strip():
+    insert_at -= 1
+
+new_lines = []
+for name in missing:
+    new_lines.append('')
+    new_lines.extend(plugin_block(example, e_start, e_end, name))
+
+merged = conf[:insert_at] + new_lines + conf[insert_at:]
+
+shutil.copyfile(conf_path, "%s.bak_%s" % (conf_path, time.strftime('%Y%m%d%H%M%S')))
+io.open(conf_path, 'w', encoding='utf-8', newline='').write('\n'.join(merged) + '\n')
+print(','.join(missing))
+PY
+)"
+
+    [ -z "$added" ] && return 0
+    echo "  ✅ 已向 backend/config.yaml 补入新增的域名收集插件：$added"
+    echo "      （原有插件配置未改动，原文件已备份为 config.yaml.bak_*）"
+}
+
 check_and_setup_config() {
     local conf="$BACKEND_DIR/config.yaml"
 
@@ -1045,6 +1153,8 @@ check_and_setup_config() {
         fi
         # 部署目录被 mv 过：修正指向旧位置的字典 / GeoIP 路径
         [ "$CHECK_ONLY" -eq 0 ] && fix_stale_config_paths "$conf"
+        # 上游新增的域名收集插件：补进运行时配置，否则界面永远看不到新插件卡片
+        [ "$CHECK_ONLY" -eq 0 ] && merge_missing_query_plugins
         return 0
     fi
 
