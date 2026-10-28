@@ -73,6 +73,20 @@ QUERY_PLUGIN:
   chaos:
     api_key: ""
     enable: false
+  zerozone: # 0.zone（零零信安），API KEY 申请：https://0.zone/applyParticulars?type=domain
+    api_key: ""
+    # 数据模块，域名数据固定为 domain
+    query_type: domain
+    # 查询语法模板，{target} 会被替换为目标域名。
+    # 若默认语法查不到数据，可参考 site 模块的官方示例（ssl_info.detail==00sec.com）
+    # 调整此处，无需改动代码。
+    query_template: 'domain=="{target}"'
+    # 单页条数（官方上限 100）与最大翻页数；免费额度按请求次数计
+    page_size: 100
+    max_page: 5
+    # 注意：本插件的配置项会被逐项校验，任一为空即视为「未配置」而跳过。
+    # 因此可选项只在需要时添加（例如超出免费额度想自动扣 Z 币时，追加 zb_pay: 1）
+    enable: false
 
 
 #*** 监控任务消息推送配置 ****

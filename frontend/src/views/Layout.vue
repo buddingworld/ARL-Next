@@ -42,7 +42,6 @@
 
         <div class="header-actions">
           <LanguageSwitcher class="header-language-switcher" />
-          <SupportAuthorPopover />
 
           <a-dropdown>
             <span class="header-text-action" style="cursor: pointer; margin-right: 24px; display: flex; align-items: center;">
@@ -264,7 +263,6 @@ import request from '@/utils/request';
 import { extractDominantColor, processImageToBase64, dbHelper } from '@/utils/theme';
 // 引入 Ant Design 的消息提示与模态框
 import { message, Modal } from 'ant-design-vue';
-import SupportAuthorPopover from '@/components/SupportAuthorPopover.vue';
 import { copyText } from '@/utils/clipboard';
 import Sortable from 'sortablejs';
 import LanguageSwitcher from '@/components/LanguageSwitcher.vue';
@@ -1122,19 +1120,6 @@ const executeToggleBasicAuth = async (checked, username = null, password = null)
   0% { transform: scale(1); opacity: 0.8; }
   50% { transform: scale(1.1); opacity: 1; text-shadow: 0 0 15px var(--arl-theme-color); }
   100% { transform: scale(1); opacity: 0.8; }
-}
-
-/* 支持作者 Popover 弹窗深度美化与暗黑模式自适应 */
-.support-author-popover-overlay .ant-popover-inner {
-  padding: 0 !important;
-  border-radius: 12px !important;
-  overflow: hidden !important;
-  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.22) !important;
-}
-body.dark-mode .support-author-popover-overlay .ant-popover-inner {
-  background: rgba(15, 23, 42, 0.96) !important;
-  border: 1px solid #1e293b !important;
-  backdrop-filter: blur(16px) !important;
 }
 
 /* 侧边栏菜单拖拽重排与自适应动效 */
