@@ -229,6 +229,21 @@ detect_arch() {
     esac
 }
 
+# 停用历史版本写入的 MongoDB apt 源。
+# 该源的签名密钥 SHA1 自签名自 2026-02-01 起被加密策略拒绝，留着会让
+# **此后每一次 apt-get update 都报错**（哪怕只是装别的软件），必须主动清理。
+cleanup_legacy_mongodb_apt_repo() {
+    [ "$OS_FAMILY" = "debian" ] || return 0
+
+    local repo_file="/etc/apt/sources.list.d/mongodb-org-7.0.list"
+    [ -f "$repo_file" ] || return 0
+
+    mv -f "$repo_file" "${repo_file}.disabled_by_arl"
+    rm -f /usr/share/keyrings/mongodb-server-7.0.gpg
+    echo "  ✅ 已停用失效的 MongoDB apt 源（其 SHA1 密钥被现代加密策略拒绝，会导致 apt-get update 报错）"
+    echo "      原文件已改名为 ${repo_file}.disabled_by_arl"
+}
+
 # ==================== 1. 系统依赖与编译工具链 ====================
 check_and_install_base_packages() {
     # 抽样探测：这些齐了就认为基础环境完整，跳过整个包管理流程（避免每次刷元数据的开销）
@@ -413,17 +428,20 @@ check_and_install_render_stack() {
         report_miss "Chromium（站点截图渲染内核，需位于 /usr/bin/chromium）"
         if [ "$CHECK_ONLY" -eq 0 ]; then
             if [ "$OS_FAMILY" = "debian" ]; then
-                run_with_spinner "安装 Chromium 与图形依赖库" pkg_install \
-                    chromium libnss3 libatk-bridge2.0-0 libgtk-3-0 libx11-xcb1 libxcb-dri3-0 \
-                    libxcomposite1 libxdamage1 libxrandr2 libgbm1 libasound2 \
-                    libxshmfence1 libdrm2 libxkbcommon0 libatspi2.0-0 libcups2 \
-                    fontconfig fonts-wqy-zenhei fonts-wqy-microhei \
+                # 只装 chromium 本体，图形运行库交给 apt 自动解析依赖。
+                # 刻意不显式列举 libasound2 / libatk-bridge2.0-0 / libcups2 / libgtk-3-0：
+                # Debian 13 (trixie) 的 64 位 time_t 迁移已把它们改名为 *t64，
+                # 沿用旧包名会让整条 apt 命令因 "Unable to locate package" 全盘失败。
+                run_with_spinner "安装 Chromium" pkg_install chromium \
                     || echo "  ⚠️  Chromium 安装失败，截图与 Web 指纹识别功能将不可用。"
+                run_with_spinner "安装中文字体" pkg_install fontconfig fonts-wqy-zenhei fonts-wqy-microhei \
+                    || echo "  ⚠️  中文字体安装失败，站点截图中的中文可能显示为方块。"
             else
-                # RHEL 系：chromium 来自 EPEL，图形依赖由 dnf 自动解析
-                run_with_spinner "安装 Chromium 与中文字体" pkg_install \
-                    chromium fontconfig wqy-zenhei-fonts \
+                # RHEL 系：chromium 来自 EPEL，图形依赖同样由 dnf 自动解析
+                run_with_spinner "安装 Chromium" pkg_install chromium \
                     || echo "  ⚠️  Chromium 安装失败，截图与 Web 指纹识别功能将不可用。"
+                run_with_spinner "安装中文字体" pkg_install fontconfig wqy-zenhei-fonts \
+                    || echo "  ⚠️  中文字体安装失败，站点截图中的中文可能显示为方块。"
             fi
 
             # 安装后补齐硬编码路径的软链
@@ -576,41 +594,79 @@ except Exception as exc:
 PY
 }
 
-# RHEL 系走官方 tarball：绕开 MongoDB 7.0 仓库密钥的 SHA1 自签名被现代加密策略拒绝的问题，
-# 改用 HTTPS + 官方 SHA256 强校验，安全性不低于 RPM GPG，且不改动系统加密策略
+# MongoDB 统一走官方 tarball：绕开 7.0 仓库密钥的 SHA1 自签名被现代加密策略拒绝的问题。
+#
+# 背景：MongoDB 7.0 的仓库签名密钥 E58830201F7DD82CD808AA84160D26BB1785BA38 使用 SHA1
+# 自签名，自 2026-02-01 起被主流发行版的加密策略判定为不安全：
+#   - Debian 13 (trixie)：apt 的 sqv 直接报 "SHA1 is not considered secure since 2026-02-01"
+#   - RHEL/CentOS 10：rpm 导入密钥时报 "Policy rejected non-revocation signature"
+# 即 apt/yum 官方源这条路在新系统上已不可用，故统一改用 HTTPS + 官方 SHA256 强校验，
+# 安全强度不低于 RPM/DEB 的 GPG 校验，且不改动系统加密策略。
 install_mongodb_tarball() {
-    local dist="rhel90"
-    local tgz="mongodb-linux-x86_64-${dist}-${MONGO_VERSION}.tgz"
-    local base="https://fastdl.mongodb.org/linux"
-    local prefix="/usr/local/mongodb"
-
-    run_with_spinner "下载 MongoDB $MONGO_VERSION（$dist）" bash -c "
-        set -e
-        cd /tmp
-        rm -f '$tgz' '$tgz.sha256'
-        curl -fSL -m 900 -o '$tgz' '$base/$tgz'
-        curl -fSL -m 60 -o '$tgz.sha256' '$base/$tgz.sha256'
-    " || die "MongoDB 下载失败，请检查网络能否访问 fastdl.mongodb.org。"
-
-    local expected actual
-    expected="$(awk '{print $1}' "/tmp/$tgz.sha256")"
-    actual="$(sha256sum "/tmp/$tgz" | awk '{print $1}')"
-    if [ "$expected" != "$actual" ]; then
-        die "MongoDB 安装包 SHA256 校验失败（期望 $expected / 实际 $actual），已中止安装。"
+    # 候选构建：优先本发行版族，回退到 glibc 向后兼容性最好的相邻版本
+    local -a candidates
+    if [ "$OS_FAMILY" = "debian" ]; then
+        candidates=("debian12" "ubuntu2204")
+    else
+        candidates=("rhel90" "rhel80")
     fi
-    echo "  ✅ MongoDB 安装包 SHA256 校验通过"
 
-    run_with_spinner "解压安装 MongoDB 到 $prefix" bash -c "
-        set -e
-        rm -rf /tmp/mongo_extract '$prefix'
+    local prefix="/usr/local/mongodb"
+    local base="https://fastdl.mongodb.org/linux"
+    local dist tgz installed=0
+
+    for dist in "${candidates[@]}"; do
+        tgz="mongodb-linux-x86_64-${dist}-${MONGO_VERSION}.tgz"
+
+        if ! run_with_spinner "下载 MongoDB $MONGO_VERSION（$dist 构建）" bash -c "
+            set -e
+            cd /tmp
+            rm -f '$tgz' '$tgz.sha256'
+            curl -fSL -m 900 -o '$tgz' '$base/$tgz'
+            curl -fSL -m 60 -o '$tgz.sha256' '$base/$tgz.sha256'
+        "; then
+            echo "  ⚠️  $dist 构建下载失败，尝试下一候选"
+            continue
+        fi
+
+        local expected actual
+        expected="$(awk '{print $1}' "/tmp/$tgz.sha256" 2>/dev/null)"
+        actual="$(sha256sum "/tmp/$tgz" 2>/dev/null | awk '{print $1}')"
+        if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
+            echo "  ⚠️  $dist 构建 SHA256 校验失败，尝试下一候选"
+            rm -f "/tmp/$tgz" "/tmp/$tgz.sha256"
+            continue
+        fi
+        echo "  ✅ MongoDB 安装包 SHA256 校验通过（$dist 构建）"
+
+        # 先解压到临时目录并试跑二进制，确认 glibc 兼容后再落到最终位置
+        rm -rf /tmp/mongo_extract
         mkdir -p /tmp/mongo_extract
-        tar xzf '/tmp/$tgz' -C /tmp/mongo_extract
-        src=\$(find /tmp/mongo_extract -maxdepth 1 -type d -name 'mongodb-*' | head -1)
-        [ -n \"\$src\" ] || exit 1
-        mv \"\$src\" '$prefix'
-        ln -sf '$prefix/bin/mongod' /usr/local/bin/mongod
-        rm -rf /tmp/mongo_extract '/tmp/$tgz' '/tmp/$tgz.sha256'
-    " || die "MongoDB 解压安装失败。"
+        if ! tar xzf "/tmp/$tgz" -C /tmp/mongo_extract 2>/dev/null; then
+            echo "  ⚠️  $dist 构建解压失败，尝试下一候选"
+            rm -rf /tmp/mongo_extract
+            continue
+        fi
+
+        local src
+        src="$(find /tmp/mongo_extract -maxdepth 1 -type d -name 'mongodb-*' | head -1)"
+        if [ -z "$src" ] || ! "$src/bin/mongod" --version >/dev/null 2>&1; then
+            echo "  ⚠️  $dist 构建在本系统无法运行（glibc 不兼容），尝试下一候选"
+            rm -rf /tmp/mongo_extract
+            continue
+        fi
+
+        rm -rf "$prefix"
+        mv "$src" "$prefix"
+        ln -sf "$prefix/bin/mongod" /usr/local/bin/mongod
+        rm -rf /tmp/mongo_extract "/tmp/$tgz" "/tmp/$tgz.sha256"
+        installed=1
+        break
+    done
+
+    if [ "$installed" -ne 1 ]; then
+        die "MongoDB 各候选构建均安装失败。请检查能否访问 fastdl.mongodb.org，或手动安装 MongoDB 7.0。"
+    fi
 
     # SELinux：经 /tmp 解压再 mv 会带入 user_tmp_t 上下文，systemd 会以 203/EXEC 拒绝执行
     if have getenforce && [ "$(getenforce 2>/dev/null)" != "Disabled" ]; then
@@ -669,24 +725,8 @@ check_and_setup_mongodb() {
     if ! have mongod; then
         report_miss "MongoDB 7.0"
         [ "$CHECK_ONLY" -eq 1 ] && return 0
-
-        if [ "$OS_FAMILY" = "debian" ]; then
-            run_with_spinner "导入 MongoDB 官方软件源" bash -c "
-                set -e
-                curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc \
-                    | gpg -o /usr/share/keyrings/mongodb-server-7.0.gpg --dearmor
-                echo 'deb [ signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] http://repo.mongodb.org/apt/debian bookworm/mongodb-org/7.0 main' \
-                    > /etc/apt/sources.list.d/mongodb-org-7.0.list
-                apt-get update -o Acquire::Retries=10
-            " || die "MongoDB 软件源导入失败，请检查网络。"
-
-            # 只装 server 与 shell：mongodb-org-tools 依赖缺失的 mongodb-database-tools，
-            # 且备份功能不在源码模式范围内
-            run_with_spinner "安装 MongoDB 7.0" pkg_install mongodb-org-server mongodb-mongosh \
-                || die "MongoDB 安装失败。"
-        else
-            install_mongodb_tarball
-        fi
+        # apt / dnf 官方源在新系统上均因密钥 SHA1 被加密策略拒绝而不可用，统一走 tarball
+        install_mongodb_tarball
     else
         report_ok "MongoDB 已安装"
     fi
@@ -1242,6 +1282,7 @@ fi
 echo ""
 
 detect_pkg_manager
+cleanup_legacy_mongodb_apt_repo
 
 echo "📋 正在检查环境..."
 check_and_install_base_packages

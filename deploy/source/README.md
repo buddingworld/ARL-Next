@@ -133,28 +133,97 @@ cd /opt/arl-next
 
 ### 2. MongoDB 7.0
 
+> **不要使用 MongoDB 官方 apt/yum 源**。其 7.0 仓库签名密钥（`E58830201F7DD82CD808AA84160D26BB1785BA38`）使用 SHA1 自签名，自 2026-02-01 起被主流发行版的加密策略判定为不安全：
+> - Debian 13 (trixie)：`apt` 的 `sqv` 报 `SHA1 is not considered secure since 2026-02-01`
+> - RHEL / CentOS 10：`rpm` 导入密钥报 `Policy rejected non-revocation signature`
+>
+> 更麻烦的是，一旦把该源写进 `/etc/apt/sources.list.d/`，**此后每一次 `apt-get update` 都会失败**（哪怕只是安装别的软件）。若你已经踩过这个坑，先停用它：
+>
+> ```bash
+> mv /etc/apt/sources.list.d/mongodb-org-7.0.list /etc/apt/sources.list.d/mongodb-org-7.0.list.disabled
+> rm -f /usr/share/keyrings/mongodb-server-7.0.gpg
+> ```
+
+改用官方 tarball + SHA256 强校验（安全强度不低于包管理器 GPG，且不改动系统加密策略）：
+
 ```bash
-curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | gpg -o /usr/share/keyrings/mongodb-server-7.0.gpg --dearmor
-echo "deb [ signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] http://repo.mongodb.org/apt/debian bookworm/mongodb-org/7.0 main" > /etc/apt/sources.list.d/mongodb-org-7.0.list
-apt-get update && apt-get install -y mongodb-org
+VER=7.0.45
+# Debian/Ubuntu 用 debian12 构建（glibc 向后兼容，Debian 13 亦可运行）；RHEL 系用 rhel90
+DIST=debian12          # RHEL/CentOS 改为 rhel90
+BASE=https://fastdl.mongodb.org/linux
+TGZ=mongodb-linux-x86_64-${DIST}-${VER}.tgz
+
+cd /tmp
+curl -fSL -O "$BASE/$TGZ"
+curl -fSL -O "$BASE/$TGZ.sha256"
+sha256sum -c "$TGZ.sha256" || { echo "校验失败，中止"; exit 1; }
+
+rm -rf /usr/local/mongodb /tmp/mongo_extract && mkdir -p /tmp/mongo_extract
+tar xzf "$TGZ" -C /tmp/mongo_extract
+mv /tmp/mongo_extract/mongodb-* /usr/local/mongodb
+ln -sf /usr/local/mongodb/bin/mongod /usr/local/bin/mongod
+mongod --version
 ```
 
-编辑 `/etc/mongod.conf`，与容器参数对齐（`docker-compose.prod.yml:138-143`）：
+创建运行用户与配置（`bindIp` 只监听本机，不对外暴露）：
 
-```yaml
+```bash
+id mongod >/dev/null 2>&1 || useradd -r -s /sbin/nologin -d /var/lib/mongo mongod
+mkdir -p /var/lib/mongo /var/log/mongodb
+chown -R mongod:mongod /var/lib/mongo /var/log/mongodb
+
+cat > /etc/mongod.conf <<'EOF'
+storage:
+  dbPath: /var/lib/mongo
+systemLog:
+  destination: file
+  logAppend: true
+  path: /var/log/mongodb/mongod.log
 net:
   port: 27017
-  bindIp: 127.0.0.1          # 只监听本机，不对外暴露
-storage:
-  wiredTiger:
-    engineConfig:
-      cacheSizeGB: 1         # 对齐容器 --wiredTigerCacheSizeGB 1
+  bindIp: 127.0.0.1
+processManagement:
+  timeZoneInfo: /usr/share/zoneinfo
+EOF
 ```
 
-先以无鉴权模式启动并创建管理员（对应容器的 `MONGO_INITDB_ROOT_USERNAME/PASSWORD=admin`）：
+> **SELinux 环境（RHEL/CentOS）必做**：tarball 经 `/tmp` 解压再 `mv`，二进制会带着 `user_tmp_t` 上下文，systemd 启动时报 `203/EXEC` 且提示 `Permission denied`，极易误判为权限位问题。
+> ```bash
+> chcon -R -t bin_t /usr/local/mongodb/bin
+> semanage fcontext -a -t bin_t "/usr/local/mongodb/bin(/.*)?"
+> restorecon -Rv /usr/local/mongodb/bin
+> ```
+
+注册 systemd 服务（用 `Type=simple`，避免 `--fork` 后子进程失败被漏判）：
 
 ```bash
+cat > /etc/systemd/system/mongod.service <<'EOF'
+[Unit]
+Description=MongoDB Database Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=mongod
+Group=mongod
+Type=simple
+ExecStart=/usr/local/bin/mongod --config /etc/mongod.conf
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=64000
+LimitNPROC=64000
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
 systemctl enable --now mongod
+```
+
+先以无鉴权模式创建管理员（对应容器的 `MONGO_INITDB_ROOT_USERNAME/PASSWORD=admin`）。RHEL 系没有 `mongosh` 包，用后端 venv 的 pymongo 亦可：
+
+```bash
 mongosh --quiet --eval '
 db.getSiblingDB("admin").createUser({
   user: "admin", pwd: "admin",
@@ -162,7 +231,7 @@ db.getSiblingDB("admin").createUser({
 })'
 ```
 
-然后启用鉴权并重启：
+然后启用鉴权并重启（`/etc/mongod.conf` 追加，注意确认文件中原本没有未注释的 `security:` 节点）：
 
 ```yaml
 security:
@@ -454,6 +523,16 @@ systemctl restart arl-web arl-worker arl-osint arl-puppeteer && systemctl reload
 | 11 | nuclei 模板拉取失败（GitHub 被重置） | 自动探测本机 SOCKS5 代理重试 |
 | 12 | GeoIP 官方直链 SSL 重置、内置镜像返回损坏内容 | 增加镜像兜底通道并强制 sha256 校验 |
 | 13 | `--check-only` 会重启 MongoDB（违反只读契约） | 体检模式改为纯只读探测 |
+
+**后续在生产环境（Debian 13 / trixie）复现并修复的问题：**
+
+| # | 问题 | 修复 |
+| :--- | :--- | :--- |
+| 14 | apt 导入 MongoDB 源报 `SHA1 is not considered secure since 2026-02-01`，且残留的源文件会让**此后每次 `apt-get update` 都失败** | 彻底移除 apt/yum 源分支，全发行版统一走 tarball + SHA256；脚本启动时自动停用历史遗留的失效源文件 |
+| 15 | Debian 13 的 64 位 time_t 迁移把 `libasound2`/`libatk-bridge2.0-0`/`libcups2`/`libgtk-3-0` 改名为 `*t64`，显式列举旧包名导致整条 apt 命令因 `Unable to locate package` 全盘失败 | 只安装 `chromium` 本体，图形运行库交给包管理器自动解析依赖 |
+
+> **问题 14 的影响面比看上去大**：MongoDB 7.0 密钥的 SHA1 自签名被拒是**策略层面的、全发行版生效**的（Debian 的 `sqv` 与 RHEL 的 `rpm` 都会拒绝），因此 apt/yum 官方源这条路在新系统上已经不可用。若你的机器曾被写入该源，务必先按第五节第 2 步停用，否则 `apt` 会持续报错。
+
 
 **apt 系路径尚未实测**（依据 Dockerfile 与发行版惯例推导），首次在 Debian/Ubuntu 上部署时建议先执行 `--check-only` 核对。
 
