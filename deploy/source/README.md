@@ -475,6 +475,44 @@ setfacl -m u:$NGX:x /root
 
 > `start-local.sh` 会在安装 nginx 后自动执行这项校验：部署目录**内部**的权限问题会直接修正，**上级目录**（如 `/root`）属宿主机安全策略则只告警并给出上面的命令，不会擅自改动。
 
+### 移动部署目录后服务起不来（`No such file or directory` / `203/EXEC`）
+
+**Python venv 不能整体 `mv`。** 移动后会出现一组自相矛盾的现象：
+
+```
+python[xxxx]: ℹ️ admin already exists, skipping password reset    ← ExecStartPre 的 python 跑成功
+(gunicorn)[xxxx]: Failed to execute /opt/arl-next/backend/.venv/bin/gunicorn: No such file or directory
+```
+
+同一个 venv 里 `python` 能跑、`gunicorn` 却"找不到"。原因是：
+
+- `.venv/bin/python` 是指向系统解释器的**软链**，能挺过移动
+- `.venv/bin/gunicorn`（以及 `pip`、`celery`）是**脚本，首行 shebang 写死了旧绝对路径**：`#!/root/ARL-Next/backend/.venv/bin/python3`
+
+内核 `execve` 找不到 shebang 里的解释器时返回 `ENOENT`，而报错信息**只会说脚本本身不存在**——极具误导性，看起来像文件真的丢了。
+
+**处理**：删掉两个 venv 让脚本重建（`start-local.sh` 已能自动识别并重建）：
+
+```bash
+cd /opt/arl-next
+rm -rf backend/.venv backend/osint_service/.venv
+sudo bash start-local.sh
+```
+
+同时 `backend/config.yaml` 里的绝对路径也还指向旧位置，表现为启动日志里的警告（不报错、不中断，极易忽略）：
+
+```
+Warning /root/ARL-Next/backend/app/dicts/domain_2w.txt is not file
+```
+
+脚本会自动修正这类过期路径并备份原文件；若手工处理：
+
+```bash
+sed -i -E "s@/[^\"'[:space:]]*/backend/(app/dicts|GeoLite2)/@/opt/arl-next/backend/\1/@g" backend/config.yaml
+```
+
+> 因此**移动部署目录后务必重跑一次 `start-local.sh`**：它会重建失效的 venv、修正配置里的过期路径，并按新路径重新渲染 systemd 单元与 nginx 配置。
+
 ### 其它
 
 先跑体检，多数问题能直接定位：

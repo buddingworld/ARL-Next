@@ -468,6 +468,25 @@ check_and_install_render_stack() {
 }
 
 # ==================== 6. Python 虚拟环境 ====================
+# venv 被整体 mv 后会失效：bin/ 下的 console script（pip / gunicorn / celery）
+# 首行 shebang 写死了旧绝对路径，而 bin/python 是指向系统解释器的软链、能挺过移动。
+# 于是出现「python 能跑、gunicorn 报 No such file or directory」这种极具误导性的现象
+# ——内核 execve 找不到 shebang 里的解释器时返回 ENOENT，报错却只提脚本自身。
+venv_relocated() {
+    local venv_dir="$1"
+    local script shebang
+    for script in pip gunicorn celery; do
+        [ -f "$venv_dir/bin/$script" ] || continue
+        shebang="$(head -n 1 "$venv_dir/bin/$script" 2>/dev/null)"
+        shebang="${shebang#\#!}"
+        shebang="${shebang%% *}"
+        case "$shebang" in
+            /*) [ -x "$shebang" ] || return 0 ;;   # 绝对路径且已不存在 → 已失效
+        esac
+    done
+    return 1
+}
+
 # 通过 requirements.txt 的 md5 戳记判断是否需要重装依赖：
 # 既能跳过重复安装，又能在上游依赖变更后自动跟进。
 venv_is_current() {
@@ -476,14 +495,23 @@ venv_is_current() {
     local stamp="$venv_dir/.arl_req_stamp"
     local req_hash=""
 
+    [ -x "$venv_dir/bin/python" ] || return 1
+    venv_relocated "$venv_dir" && return 1
+
     [ -f "$req_file" ] && req_hash="$(md5sum "$req_file" | awk '{print $1}')"
-    [ -x "$venv_dir/bin/python" ] && [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$req_hash" ]
+    [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$req_hash" ]
 }
 
 prepare_venv() {
     local venv_dir="$1"
     local req_file="$2"
     local label="$3"
+
+    # 部署目录被迁移过时，旧 venv 的脚本 shebang 已失效，必须重建
+    if [ -d "$venv_dir" ] && venv_relocated "$venv_dir"; then
+        echo "  ⚠️  检测到 $label 虚拟环境随目录迁移而失效（脚本 shebang 仍指向旧路径），正在重建..."
+        rm -rf "$venv_dir"
+    fi
 
     if [ ! -x "$venv_dir/bin/python" ]; then
         run_with_spinner "创建 $label 虚拟环境" python3 -m venv "$venv_dir" \
@@ -981,6 +1009,27 @@ EOF
 }
 
 # ==================== 11. 后端配置 ====================
+# 部署目录被 mv 过时，config.yaml 里的绝对路径仍指向旧位置：
+# 字典与 GeoIP 找不到文件，表现为启动日志里的 "xxx is not file" 警告与归属地解析静默降级
+# （不报错、不中断，只在日志里留一行 Warning，极易被忽略）。
+fix_stale_config_paths() {
+    local conf="$1"
+    local stale
+
+    stale="$(grep -oE '/[^"'"'"'[:space:]]*/backend/(app/dicts|GeoLite2)/' "$conf" 2>/dev/null \
+             | grep -v "^$REPO_DIR/" | sort -u)"
+    [ -z "$stale" ] && return 0
+
+    cp -f "$conf" "$conf.bak_$(date +%Y%m%d%H%M%S)"
+
+    # 统一改回当前部署目录；对本就正确的路径是无操作（幂等）
+    sed -i -E "s@/[^\"'[:space:]]*/backend/(app/dicts|GeoLite2)/@${REPO_DIR//&/\\&}/backend/\1/@g" "$conf"
+
+    echo "  ⚠️  配置中的字典 / GeoIP 路径仍指向旧部署目录，已修正为 $REPO_DIR："
+    printf '      %s\n' $stale
+    echo "      （原文件已备份为 $(basename "$conf").bak_*）"
+}
+
 check_and_setup_config() {
     local conf="$BACKEND_DIR/config.yaml"
 
@@ -992,6 +1041,8 @@ check_and_setup_config() {
             echo "  ⚠️  检测到配置中仍含容器路径 /code/backend，请改为本机路径："
             echo "      sed -i 's#/code/backend/#$REPO_DIR/backend/#g' $conf"
         fi
+        # 部署目录被 mv 过：修正指向旧位置的字典 / GeoIP 路径
+        [ "$CHECK_ONLY" -eq 0 ] && fix_stale_config_paths "$conf"
         return 0
     fi
 
