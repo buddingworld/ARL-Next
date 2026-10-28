@@ -1121,6 +1121,91 @@ configure_selinux_for_nginx() {
     echo "  ✅ 已配置 SELinux：放行 5173 端口并标记前端产物/证书目录"
 }
 
+# 取 nginx 工作进程用户（Debian 系为 www-data，RHEL 系为 nginx）
+nginx_worker_user() {
+    local u
+    u="$(nginx -T 2>/dev/null | awk '/^[[:space:]]*user[[:space:]]+/ {print $2; exit}' | tr -d ';')"
+    if [ -z "$u" ]; then
+        if id www-data >/dev/null 2>&1; then u="www-data"; else u="nginx"; fi
+    fi
+    echo "$u"
+}
+
+# 以指定用户执行 test 判定（runuser 优先，回退 su）
+as_user_test() {
+    local user="$1"
+    shift
+    if have runuser; then
+        runuser -u "$user" -- test "$@" 2>/dev/null
+    else
+        su -s /bin/sh "$user" -c "test $*" 2>/dev/null
+    fi
+}
+
+# 校验 nginx 工作进程能否真正读到前端产物。
+#
+# 典型故障：部署目录位于 /root 等 700 权限路径下（例如按 README 克隆到 ~/ARL-Next），
+# nginx 以 www-data / nginx 运行，连目录都无法遍历，访问首页只会得到 403 Forbidden，
+# 而 nginx error.log 里仅有一句 Permission denied，极易被误判成 nginx 配置写错。
+verify_web_root_readable() {
+    local idx="$FRONTEND_DIR/dist/index.html"
+    local user
+    user="$(nginx_worker_user)"
+
+    if [ ! -f "$idx" ]; then
+        echo "  ⚠️  前端产物缺失：$idx（首页会返回 403/404）"
+        echo "      请重新构建：cd $FRONTEND_DIR && pnpm run build"
+        return 1
+    fi
+
+    id "$user" >/dev/null 2>&1 || return 0
+    as_user_test "$user" -r "$idx" && return 0
+
+    echo "  ⚠️  nginx 工作进程用户 [$user] 读不到前端产物，访问首页会返回 403 Forbidden"
+
+    # 逐级定位不可遍历的目录
+    local -a blocked=()
+    local -a parts
+    local p="" part
+    IFS='/' read -r -a parts <<< "$FRONTEND_DIR"
+    for part in "${parts[@]}"; do
+        [ -z "$part" ] && continue
+        p="$p/$part"
+        as_user_test "$user" -x "$p" || blocked+=("$p")
+    done
+
+    local b
+    for b in "${blocked[@]}"; do
+        echo "      ↳ 不可遍历：$b（权限 $(stat -c '%a' "$b" 2>/dev/null)）"
+    done
+
+    # 部署目录内部的问题可直接修正；上级目录（如 /root、/opt）属宿主机安全策略，只提示不动手
+    local internal_only=1
+    for b in "${blocked[@]}"; do
+        case "$b" in
+            "$REPO_DIR"|"$REPO_DIR"/*) ;;
+            *) internal_only=0 ;;
+        esac
+    done
+
+    if [ "$internal_only" -eq 1 ] && [ ${#blocked[@]} -gt 0 ]; then
+        chmod o+rx "$REPO_DIR" "$FRONTEND_DIR" "$FRONTEND_DIR/dist" 2>/dev/null || true
+        find "$FRONTEND_DIR/dist" -type d -exec chmod o+rx {} + 2>/dev/null || true
+        find "$FRONTEND_DIR/dist" -type f -exec chmod o+r {} + 2>/dev/null || true
+        if as_user_test "$user" -r "$idx"; then
+            echo "  ✅ 已修正部署目录内部权限，nginx 现在可读取前端产物"
+            return 0
+        fi
+    fi
+
+    echo "      👉 推荐：把部署目录移到 /opt 下（如 /opt/arl-next）后重跑本脚本"
+    echo "         若需就地放行，仅授予该用户遍历权（不影响其他用户）："
+    for b in "${blocked[@]}"; do
+        echo "         setfacl -m u:$user:x '$b'"
+    done
+    return 1
+}
+
 check_and_setup_nginx() {
     # 注意：暂存文件必须建在目标目录内再 mv。
     # 若用 mktemp 建在 /tmp 再 mv 过去，文件会带着 user_tmp_t 上下文，
@@ -1168,6 +1253,9 @@ check_and_setup_nginx() {
             systemctl start nginx
         fi
     " || die "Nginx 启动失败，请执行 'journalctl -u nginx -n 30' 排查。"
+
+    # 提前暴露「首页 403」这一类问题，避免装完才发现
+    verify_web_root_readable || true
 }
 
 # ==================== 15. systemd 服务单元 ====================
@@ -1253,16 +1341,20 @@ verify_health() {
         echo "  ⚠️  后端等待超时，请检查：journalctl -u arl-web -n 50 --no-pager"
     fi
 
-    # 前端网关 TLS 握手探测
-    local i
+    # 前端网关探测：不只看 TLS 握手，还要确认返回的是正常页面。
+    # 注意 curl 对 403/404 仍返回退出码 0，只判断退出码会把「首页 403」误判为健康。
+    local i code=""
     for i in $(seq 1 5); do
-        if curl -k -s -m 3 -o /dev/null https://127.0.0.1:5173/ 2>/dev/null; then
-            echo "  ✅ 前端网关 (5173) TLS 握手正常"
+        code="$(curl -k -s -m 5 -o /dev/null -w '%{http_code}' https://127.0.0.1:5173/ 2>/dev/null)"
+        if [ -n "$code" ] && [ "$code" -ge 200 ] 2>/dev/null && [ "$code" -lt 400 ] 2>/dev/null; then
+            echo "  ✅ 前端网关 (5173) 返回 HTTP $code，TLS 与静态资源均正常"
             return 0
         fi
         sleep 2
     done
-    echo "  ⚠️  前端网关 5173 握手失败，请检查：systemctl status nginx"
+    echo "  ⚠️  前端网关 5173 返回异常（HTTP ${code:-无响应}）"
+    echo "      403 多为 nginx 工作进程读不到前端产物（权限或产物缺失），请检查："
+    echo "      tail -20 /var/log/nginx/error.log"
     return 1
 }
 

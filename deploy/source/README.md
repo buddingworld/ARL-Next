@@ -442,7 +442,50 @@ rabbitmqctl list_users
 
 ---
 
-## 六、日常运维
+## 六、常见故障排查
+
+### 访问 `https://<IP>:5173` 返回 **403 Forbidden**
+
+nginx 返回 403 只有两种成因，`tail -20 /var/log/nginx/error.log` 一句话即可区分：
+
+| error.log 关键字 | 成因 | 处理 |
+| :--- | :--- | :--- |
+| `Permission denied` | nginx 工作进程（Debian `www-data` / RHEL `nginx`）**读不到前端产物** | 见下方 |
+| `directory index of ... is forbidden` | 产物目录存在但**没有 index.html**，即前端未构建成功 | `cd frontend && pnpm run build` |
+
+**权限问题最常见的场景是部署目录位于 `/root` 下**（例如按 README 克隆到 `~/ARL-Next`）。Debian 的 `/root` 是 `700`，nginx 以 `www-data` 运行连目录都无法遍历，于是整个站点 403。逐级定位：
+
+```bash
+NGX=$(nginx -T 2>/dev/null | awk '/^[[:space:]]*user[[:space:]]+/{print $2;exit}' | tr -d ';')
+[ -z "$NGX" ] && NGX=www-data
+p=""; for part in $(echo /root/ARL-Next | tr '/' ' '); do
+    p="$p/$part"; runuser -u "$NGX" -- test -x "$p" || echo "不可遍历: $p ($(stat -c %a "$p"))"
+done
+```
+
+处理方式二选一：
+
+```bash
+# 推荐：把部署目录移到 /opt 下（nginx 天然可读）
+mv /root/ARL-Next /opt/arl-next && cd /opt/arl-next && sudo bash start-local.sh
+
+# 就地放行：只授予该用户遍历权，不影响其他用户（需 acl 包）
+setfacl -m u:$NGX:x /root
+```
+
+> `start-local.sh` 会在安装 nginx 后自动执行这项校验：部署目录**内部**的权限问题会直接修正，**上级目录**（如 `/root`）属宿主机安全策略则只告警并给出上面的命令，不会擅自改动。
+
+### 其它
+
+先跑体检，多数问题能直接定位：
+
+```bash
+sudo bash start-local.sh --check-only
+```
+
+---
+
+## 七、日常运维
 
 ```bash
 systemctl restart arl-web arl-worker arl-osint arl-puppeteer   # 重启全栈
@@ -457,7 +500,7 @@ journalctl -u arl-web -n 100 --no-pager
 
 ---
 
-## 七、可选加固：降权运行
+## 八、可选加固：降权运行
 
 若不愿以 root 运行，需要同时满足三个条件，缺一会静默降级：
 
@@ -479,7 +522,7 @@ chown -R arl:arl /opt/arl-next/backend/app/tmp /opt/arl-next/backend/app/tmp_scr
 
 ---
 
-## 八、后续升级成本（务必知悉）
+## 九、后续升级成本（务必知悉）
 
 容器模式升级是一条命令；源码模式每次跟进上游都需要：
 
@@ -495,7 +538,7 @@ systemctl restart arl-web arl-worker arl-osint arl-puppeteer && systemctl reload
 
 ---
 
-## 九、验证状态
+## 十、验证状态
 
 **已在 CentOS Stream 10（x86_64，1 核 / 923MB 内存 / SELinux Enforcing）上完成端到端实测**，`start-local.sh` 全流程跑通：
 
