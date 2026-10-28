@@ -221,14 +221,18 @@ systemctl daemon-reload
 systemctl enable --now mongod
 ```
 
-先以无鉴权模式创建管理员（对应容器的 `MONGO_INITDB_ROOT_USERNAME/PASSWORD=admin`）。RHEL 系没有 `mongosh` 包，用后端 venv 的 pymongo 亦可：
+先以无鉴权模式创建管理员（对应容器的 `MONGO_INITDB_ROOT_USERNAME/PASSWORD=admin`）。
+
+> **注意**：MongoDB 官方 tarball 里**只有 `mongod` / `mongos`，不含 `mongosh`**（它是独立组件，且官方未在下载路径提供 `.sha256` 校验文件）。因此下面统一用**后端 venv 的 pymongo** 操作——它随依赖安装必然存在，无需额外下载：
 
 ```bash
-mongosh --quiet --eval '
-db.getSiblingDB("admin").createUser({
-  user: "admin", pwd: "admin",
-  roles: [{ role: "root", db: "admin" }]
-})'
+/opt/arl-next/backend/.venv/bin/python - <<'PY'
+from pymongo import MongoClient
+c = MongoClient("mongodb://127.0.0.1:27017/?directConnection=true")
+c.admin.command("createUser", "admin", pwd="admin",
+                roles=[{"role": "root", "db": "admin"}])
+print("admin user created")
+PY
 ```
 
 然后启用鉴权并重启（`/etc/mongod.conf` 追加，注意确认文件中原本没有未注释的 `security:` 节点）：
@@ -240,8 +244,29 @@ security:
 
 ```bash
 systemctl restart mongod
-mongosh "mongodb://admin:admin@127.0.0.1:27017/?authSource=admin" --quiet --eval 'db.runCommand({ping:1})'
+/opt/arl-next/backend/.venv/bin/python - <<'PY'
+from pymongo import MongoClient
+MongoClient("mongodb://admin:admin@127.0.0.1:27017/?authSource=admin",
+            serverSelectionTimeoutMS=8000).admin.command("ping")
+print("mongodb auth OK")
+PY
 ```
+
+<details>
+<summary><b>可选：安装 mongosh 交互式命令行</b></summary>
+<br/>
+
+`mongosh` 只在手工排查时更顺手，脚本与运行时都不依赖它。官方未提供校验文件，故此处不做校验，介意的话可自行核对官方发布的指纹：
+
+```bash
+cd /tmp
+curl -fSL -o mongosh.tgz "https://downloads.mongodb.com/compass/mongosh-2.5.6-linux-x64.tgz"
+tar xzf mongosh.tgz
+install -m 0755 mongosh-2.5.6-linux-x64/bin/mongosh /usr/local/bin/mongosh
+mongosh --version
+```
+
+</details>
 
 > **上线前请改掉 admin/admin**，并同步修改 `backend/config.yaml` 的 `MONGO.URI`。
 
@@ -434,7 +459,9 @@ curl -s http://127.0.0.1:5000/ >/dev/null && echo "后端 OK"
 curl -k -s -o /dev/null -w "网关 HTTP %{http_code}\n" https://127.0.0.1:5173/
 
 # 依赖连通性
-mongosh "mongodb://admin:admin@127.0.0.1:27017/?authSource=admin" --quiet --eval 'db.runCommand({ping:1})'
+/opt/arl-next/backend/.venv/bin/python -c "from pymongo import MongoClient; \
+MongoClient('mongodb://admin:admin@127.0.0.1:27017/?authSource=admin', \
+serverSelectionTimeoutMS=8000).admin.command('ping'); print('mongodb OK')"
 rabbitmqctl list_users
 ```
 
@@ -593,7 +620,7 @@ systemctl restart arl-web arl-worker arl-osint arl-puppeteer && systemctl reload
 | :--- | :--- | :--- |
 | 1 | 脚本硬拒绝非 apt 发行版 | 增加 dnf 系完整支持 |
 | 2 | MongoDB 7.0 仓库密钥 SHA1 自签名被加密策略拒绝 | 改用官方 tarball + SHA256 校验，不改动系统加密策略 |
-| 3 | `mongodb-org-tools` 依赖缺失导致整包安装失败 | 仅装 server + mongosh（备份功能本就不在范围内） |
+| 3 | `mongodb-org-tools` 依赖缺失导致整包安装失败 | 仅装 server（备份功能本就不在范围内；tarball 不含 mongosh，管理操作统一改用 venv 的 pymongo） |
 | 4 | mongod 二进制带 `user_tmp_t` 上下文，systemd 报 203/EXEC | `chcon` + `semanage fcontext` 修正 |
 | 5 | nginx 读配置文件 Permission denied | 目标目录内创建 + `restorecon` |
 | 6 | nginx 无法监听 5173 | `semanage port` 放行 |

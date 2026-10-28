@@ -816,8 +816,10 @@ check_and_setup_mongodb() {
     else
         echo "  ⚠️  MongoDB 已启动，但用默认凭据连接失败。"
         echo "      若你在 backend/config.yaml 中自定义过账号密码，请忽略本条；"
-        echo "      否则请手动创建："
-        echo "      mongosh --eval 'db.getSiblingDB(\"admin\").createUser({user:\"$MONGO_USER\",pwd:\"$MONGO_PASS\",roles:[{role:\"root\",db:\"admin\"}]})'"
+        echo "      否则请手动创建（tarball 安装不含 mongosh，故用 venv 的 pymongo）："
+        echo "      $VENV/bin/python -c \"from pymongo import MongoClient; \\"
+        echo "        MongoClient('mongodb://127.0.0.1:27017/?directConnection=true').admin.command(\\"
+        echo "          'createUser', '$MONGO_USER', pwd='$MONGO_PASS', roles=[{'role':'root','db':'admin'}])\""
     fi
 }
 
