@@ -252,6 +252,7 @@ export default {
   "exportSelectedWebsites": "站点批量导出",
   "exportSelectedIpPortPairs": "IP 端口批量导出",
   "exportSelectedIps": "IP 批量导出",
+  "exportSelectedDomainIpPairs": "子域名:IP 批量导出",
   "exportSelectedDomains": "域名批量导出",
   "exportSelectedCClassNetworks": "C段 批量导出",
   "stopSelected": "批量停止",

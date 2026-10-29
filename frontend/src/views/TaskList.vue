@@ -477,6 +477,7 @@
                 <a-menu-item key="cip">{{ taskText('tasks.exportSelectedCClassNetworks') }}</a-menu-item>
                 <a-menu-item key="domain">{{ taskText('tasks.exportSelectedDomains') }}</a-menu-item>
                 <a-menu-item key="ip">{{ taskText('tasks.exportSelectedIps') }}</a-menu-item>
+                <a-menu-item key="domain_ip">{{ taskText('tasks.exportSelectedDomainIpPairs') }}</a-menu-item>
                 <a-menu-item key="ip_port">{{ taskText('tasks.exportSelectedIpPortPairs') }}</a-menu-item>
                 <a-menu-item key="site">{{ taskText('tasks.exportSelectedWebsites') }}</a-menu-item>
                 <a-menu-item key="url">{{ taskText('tasks.exportSelectedUrls') }}</a-menu-item>

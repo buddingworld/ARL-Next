@@ -250,6 +250,7 @@ export default {
   "exportSelectedWebsites": "Экспорт выбранных сайтов",
   "exportSelectedIpPortPairs": "Экспорт выбранных пар IP:порт",
   "exportSelectedIps": "Экспорт выбранных IP",
+  "exportSelectedDomainIpPairs": "Экспорт выбранных пар поддомен:IP",
   "exportSelectedDomains": "Экспорт выбранных доменов",
   "exportSelectedCClassNetworks": "Экспорт выбранных сетей класса C",
   "stopSelected": "Остановить выбранные",

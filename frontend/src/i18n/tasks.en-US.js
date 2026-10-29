@@ -252,6 +252,7 @@ export default {
   "exportSelectedWebsites": "Export selected websites",
   "exportSelectedIpPortPairs": "Export selected IP:port pairs",
   "exportSelectedIps": "Export selected IPs",
+  "exportSelectedDomainIpPairs": "Export selected subdomain:IP pairs",
   "exportSelectedDomains": "Export selected domains",
   "exportSelectedCClassNetworks": "Export selected C-class networks",
   "stopSelected": "Stop selected",

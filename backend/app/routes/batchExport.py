@@ -108,6 +108,41 @@ class BatchExportIpPort(ARLResource):
         return response
 
 
+@ns.route('/domain_ip/')
+class BatchExportDomainIP(ARLResource):
+
+    @auth
+    @ns.expect(batch_export_fields)
+    def post(self):
+        """
+        子域名:IP 批量导出
+        """
+        args = self.parse_args(batch_export_fields)
+        task_id_list = args.get("task_id", [])
+
+        items_set = set()
+        for task_id in task_id_list:
+            if not task_id:
+                continue
+
+            query = {"task_id": task_id}
+            # 取 ips 而非 record：record 存的是解析记录原值（CNAME 时是域名而非 IP），
+            # 而 ips 是最终解析到的 IP 列表，A 记录与 CNAME 记录都已回填，可直接配对使用
+            items = list(utils.conn_db('domain').find(query, {"domain": 1, "ips": 1, "_id": 0}))
+
+            for item in items:
+                curr_domain = item.get("domain")
+                if not curr_domain:
+                    continue
+                for ip in item.get("ips") or []:
+                    if ip:
+                        items_set.add("{}:{}".format(curr_domain, ip))
+
+        response = self.send_file(items_set, "domain_ip")
+
+        return response
+
+
 @ns.route('/cip/')
 class BatchExportCIP(ARLResource):
 
