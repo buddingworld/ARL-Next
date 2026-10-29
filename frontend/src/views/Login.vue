@@ -74,10 +74,18 @@ const onFinish = async (values) => {
 
     if (loginRes.code === 200) {
       localStorage.setItem('token', loginRes.data.token);
+      // 记录登录身份：顶部导航栏据此显示账号名，系统设置据此控制「用户管理」入口可见性
+      localStorage.setItem('userInfo', JSON.stringify({
+        username: loginRes.data.username,
+        role: loginRes.data.role
+      }));
       message.success(t('login.success'));
       router.push('/');
     } else if (loginRes.code === 401) {
       message.error(t('login.invalidCredentials'));
+    } else if (loginRes.code === 403) {
+      // 账号被管理员锁定：后端返回 403 与明确原因，直接透出，避免误报为「账号密码错误」
+      message.error(loginRes.message || t('login.failed', { reason: t('common.unknownError') }));
     } else {
       message.error(t('login.failed', { reason: loginRes.message || t('common.unknownError') }));
     }

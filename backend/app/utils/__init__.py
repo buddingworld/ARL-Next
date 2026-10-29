@@ -465,7 +465,11 @@ def is_valid_exclude_ports(exclude_ports):
         return False
 
 
-from .user import user_login, user_login_header, auth, user_logout, change_pass, user_refresh_token
+from .user import (user_login, user_login_header, auth, user_logout, change_pass, user_refresh_token,
+                   admin_required, current_user_profile, UserLockedError,
+                   list_users, add_user, update_user, delete_user, set_user_status,
+                   get_user_role, get_user_status, ROLE_ADMIN, ROLE_USER,
+                   STATUS_ACTIVE, STATUS_LOCKED)
 from .push import message_push
 from .fingerprint import parse_human_rule, transform_rule_map
 

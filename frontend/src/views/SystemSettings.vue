@@ -890,6 +890,9 @@
           </a-tab-pane>
         </a-tabs>
       </a-tab-pane>
+      <a-tab-pane v-if="isAdmin" key="user_manage" :tab="tabTitle(pageText('pages.userManagement'), false)">
+        <UserManagePanel />
+      </a-tab-pane>
       <a-tab-pane key="message_push" :tab="tabTitle(pageText('pages.notificationsAndCallbacks'), Object.keys(pendingByGroup.message_push).length > 0)">
         <div style="max-width: 1100px; padding-bottom: 40px;">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
@@ -1084,6 +1087,7 @@ import { useRoute, onBeforeRouteLeave } from 'vue-router';
 import CdnRulePanel from '@/components/settings/CdnRulePanel.vue';
 import BackupRestorePanel from '@/components/settings/BackupRestorePanel.vue';
 import SystemUpdatePanel from '@/components/settings/SystemUpdatePanel.vue';
+import UserManagePanel from '@/components/settings/UserManagePanel.vue';
 
 const { t: pageText, locale: pageLocale } = useI18n({ useScope: 'global' });
 
@@ -1095,6 +1099,35 @@ const route = useRoute();
 const activeKey = ref('dictionary');
 const dictSubTab = ref('dict');
 const scanSubTab = ref('performance');
+
+// 「用户管理」仅对管理员可见。
+// 这里只是界面层的可见性控制，真正的权限边界在后端的 admin_required；
+// 历史 localStorage 没有 role 字段时按管理员处理，与后端兜底规则保持一致，
+// 避免升级后原有管理员看不到入口。
+const isAdmin = ref(true);
+try {
+  const cachedUser = JSON.parse(localStorage.getItem('userInfo') || '{}');
+  isAdmin.value = !cachedUser.role || cachedUser.role === 'admin';
+} catch (e) {
+  isAdmin.value = true;
+}
+
+// 用接口校准一次角色：localStorage 里的值可能已过期（例如管理员刚调整了本账号的角色），
+// 也可能因历史版本从未写入过 userInfo 而缺失。取不到时保持上面的初值。
+const refreshAdminFlag = async () => {
+  try {
+    const res = await request.get('/user/profile');
+    if (res.code === 200 && res.data && res.data.username) {
+      isAdmin.value = res.data.role === 'admin';
+      localStorage.setItem('userInfo', JSON.stringify({
+        username: res.data.username,
+        role: res.data.role
+      }));
+    }
+  } catch (e) {
+    // 身份校准失败不影响设置页主流程，按初值展示
+  }
+};
 const loading = ref(false);
 const searchLoading = ref(false);
 const submitLoading = ref(false);
@@ -1600,6 +1633,8 @@ const SETTINGS_INDEX = [
     get desc() { return pageText('pages.backupIndexDescription'); }, keywords: ['备份', '恢复', 'backup', 'restore', '导出', '导入', '快照', '全量备份', '迁移'] },
   { tab: 'system_update', get tabLabel() { return pageText('pages.systemVersionAndUpdates'); }, get label() { return pageText('pages.systemVersionAndUpdates'); }, anchor: 'update',
     get desc() { return pageText('pages.versionComparisonReleaseNotesAndSystemUpdates'); }, keywords: ['版本', '更新', '升级', 'update', 'version', 'changelog', "系统版本与更新 / 系统版本与更新 / 版本比对、更新日志与一键更新"] },
+  { tab: 'user_manage', get tabLabel() { return pageText('pages.userManagement'); }, get label() { return pageText('pages.userManagement'); }, anchor: 'user_manage',
+    get desc() { return pageText('pages.userManagementDescription'); }, keywords: ['用户', '账号', '角色', '权限', '锁定', '解锁', 'user', 'account', 'role', 'lock', "用户管理 / 用户管理 / 账号增删改与锁定解锁"] },
 ];
 
 const settingsKeyword = ref('');
@@ -1609,6 +1644,9 @@ const settingsSearchResults = computed(() => {
   const kw = settingsKeyword.value.trim().toLowerCase();
   if (!kw) return [];
   return SETTINGS_INDEX.filter((item) => {
+    // 用户管理仅管理员可用，普通用户的搜索结果里也不应出现该条目
+    if (item.tab === 'user_manage' && !isAdmin.value) return false;
+
     const haystack = [item.label, item.desc, item.tabLabel, ...(item.keywords || [])]
       .join(' ').toLowerCase();
     return haystack.includes(kw);
@@ -2549,6 +2587,7 @@ const probeActiveBackupTask = async () => {
 
 onMounted(() => {
   probeActiveBackupTask();
+  refreshAdminFlag();
 
   if (route.query.tab) {
     if (route.query.tab === 'cdn') {
