@@ -103,6 +103,10 @@ add_task_fields = ns.model('AddTask', { # 创建添加任务命名空间。
     "alt_dns": fields.Boolean(example=False),
     "ssl_cert": fields.Boolean(example=False),
     "dns_query_plugin": fields.Boolean(example=False, default=False),
+    "dns_query_plugin_sources": fields.List(
+        fields.String,
+        description="本次任务启用的域名收集插件名列表；缺省表示沿用全部已启用插件",
+        example=[]),
     "skip_scan_cdn_ip": fields.Boolean(example=False, default=False),
     "nuclei_scan": fields.Boolean(description="nuclei 扫描", example=False, default=False),
     "nuclei_config": fields.Raw(description="nuclei 细粒度配置", example={}),

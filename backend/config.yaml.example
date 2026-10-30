@@ -28,53 +28,75 @@ FOFA:
   MAX_PAGE: 50
   PAGE_SIZE: 2000
 
+#0.zone（零零信安）配置项
+# 与 FOFA 一致：密钥在全局配置里填写（可在「系统设置 → 资产测绘与情报」界面修改），
+# 插件处只保留开关，不在 QUERY_PLUGIN 中重复存放密钥
+# API 申请：https://0.zone/applyParticulars?type=domain
+ZEROZONE:
+  KEY: ""
+
 
 # 利用三方API进行域名收集
 # 测试命令 python3.6 -m test.test_query_plugin [source1] [source2]
 # 域名查询插件配置, enable 字段可以单独控制是否启用该插件，如果没有这个字段也会默认启用
 QUERY_PLUGIN:
+# 各插件的 enable 控制「全局是否启用」；
+# active_default 控制「新建资产侦查任务时是否默认勾选」，缺省视为 true。
   alienvault:
     enable: true
+    active_default: true
   certspotter: # https://www.certspotter.com/
     after_id: 1
     max_page: 3
     enable: true
+    active_default: true
   crtsh:
     enable: true
+    active_default: true
   hackertarget:
     enable: true
+    active_default: true
   anubis:
     enable: true
+    active_default: true
   wayback:
     enable: true
+    active_default: true
   fofa:  # fofa 的key配置在上面
     enable: true
+    active_default: true
   hunter_qax: # 网站 https://hunter.qianxin.com/
     api_key: ""
     page_size: 100
     max_page: 5
     enable: false
+    active_default: true
   quake_360: # 网站 https://quake.360.cn/
     quake_token: ""
     max_size: 500
     enable: false
+    active_default: true
   rapiddns:
     enable: true
+    active_default: true
   securitytrails: # 网站 https://securitytrails.com/
     api_key: ""
     enable: false
+    active_default: true
   virustotal: # 网站 https://www.virustotal.com/gui/
     api_key: ""
     enable: false
+    active_default: true
   zoomeye:
     api_key: ""
     max_page: 20
     enable: false
+    active_default: true
   chaos:
     api_key: ""
     enable: false
-  zerozone: # 0.zone（零零信安），API KEY 申请：https://0.zone/applyParticulars?type=domain
-    api_key: ""
+    active_default: true
+  zerozone: # 0.zone（零零信安），API KEY 在顶部 ZEROZONE 全局配置中填写
     # 数据模块，域名数据固定为 domain
     query_type: domain
     # 查询语法模板，{target} 会被替换为目标域名。
@@ -87,6 +109,7 @@ QUERY_PLUGIN:
     # 注意：本插件的配置项会被逐项校验，任一为空即视为「未配置」而跳过。
     # 因此可选项只在需要时添加（例如超出免费额度想自动扣 Z 币时，追加 zb_pay: 1）
     enable: false
+    active_default: true
 
 
 #*** 监控任务消息推送配置 ****

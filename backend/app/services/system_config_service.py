@@ -21,6 +21,7 @@ def _credential_presence():
 
     fields = {
         "fofa_key": ("FOFA_KEY", "fofa_key"),
+        "zerozone_key": ("ZEROZONE_KEY", "zerozone_key"),
         "github_token": ("GITHUB_TOKEN", "github_token"),
         "tyc_id": ("TYC_ID", "tyc_id"),
         "tyc_token": ("TYC_TOKEN", "tyc_token"),

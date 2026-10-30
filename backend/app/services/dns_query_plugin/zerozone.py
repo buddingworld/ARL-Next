@@ -1,6 +1,7 @@
 import json
 import time
 
+from app.config import Config
 from app.services.dns_query import DNSQueryBase
 from app import utils
 
@@ -16,6 +17,9 @@ class Query(DNSQueryBase):
 
     鉴权用请求体里的 zone_key_id 字段（即控制台申请的 API KEY），不是 HTTP 头。
     API 申请：https://0.zone/applyParticulars?type=domain
+
+    API KEY 走全局配置（Config.ZEROZONE_KEY，可在「系统设置 → 资产测绘与情报」填写），
+    与 FOFA 一致——插件处只保留开关，不在插件配置里重复存放密钥。
 
     关于查询语法与返回字段：
         0.zone 的 query 采用 `字段==值` 语法（site 模块的官方示例为
@@ -33,16 +37,17 @@ class Query(DNSQueryBase):
         super(Query, self).__init__()
         self.source_name = "zerozone"
         self.api_url = "https://0.zone/api/data/"
-        self.api_key = None
         self.query_type = "domain"
         self.query_template = 'domain=="{target}"'
         self.page_size = 100
         self.max_page = 5
         self.zb_pay = False
 
-    def init_key(self, api_key=None, query_type="domain", query_template='domain=="{target}"',
-                 page_size=100, max_page=5, zb_pay=None):
-        self.api_key = api_key
+    def init_key(self, query_type="domain", query_template='domain=="{target}"',
+                 page_size=100, max_page=5, zb_pay=None, **_legacy):
+        # **_legacy 吸收历史配置字段：本次改动前插件块里还有 api_key，
+        # 已部署环境的 config.yaml 不会自动清理，多接收一个未知参数可避免
+        # init_key 抛 TypeError 导致插件静默失效（密钥已统一走全局配置，此处忽略）
         self.query_type = query_type or "domain"
         self.query_template = query_template or 'domain=="{target}"'
 
@@ -91,6 +96,13 @@ class Query(DNSQueryBase):
         return hosts
 
     def sub_domains(self, target):
+        # 密钥来自全局配置；未配置时直接抛错，避免发出一堆注定 401 的请求
+        api_key = Config.ZEROZONE_KEY
+        if not api_key:
+            raise Exception(
+                "{}: 未配置 0.zone API KEY，请在「系统设置 → 资产测绘与情报」的全局配置中填写".format(
+                    self.source_name))
+
         query = self.query_template.replace("{target}", target)
         self.logger.debug("{} target:{} query:{}".format(self.source_name, target, query))
 
@@ -104,7 +116,7 @@ class Query(DNSQueryBase):
                 "query_type": self.query_type,
                 "page": page,
                 "pagesize": self.page_size,
-                "zone_key_id": self.api_key,
+                "zone_key_id": api_key,
             }
             if self.zb_pay:
                 payload["zb_pay"] = 1

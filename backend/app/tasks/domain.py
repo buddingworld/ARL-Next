@@ -871,7 +871,20 @@ class DomainTask(CommonTask):
     # *** 执行域名查询插件
     def dns_query_plugin(self):
         logger.info("start run dns_query_plugin {}".format(self.base_domain))
-        results = run_query_plugin(self.base_domain, [])
+
+        # 本次任务勾选的插件清单。
+        # 注意区分「未指定」与「显式为空」：前者是本次改动之前创建的老任务，
+        # 沿用既有行为（跑全部已启用插件）；后者表示用户在界面上取消了全部勾选。
+        sources = self.options.get("dns_query_plugin_sources")
+        if sources is None:
+            results = run_query_plugin(self.base_domain, [])
+        elif not sources:
+            logger.info("dns_query_plugin sources is empty, skip {}".format(self.base_domain))
+            return
+        else:
+            logger.info("dns_query_plugin sources:{}".format(sources))
+            results = run_query_plugin(self.base_domain, sources)
+
         sources_map = dict()
         for result in results:
             domain = result["domain"]

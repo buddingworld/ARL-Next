@@ -1011,7 +1011,57 @@
             </div>
             <a-row :gutter="[12, 8]">
               <a-col :span="8" v-for="item in category.plugins" :key="item.key">
-                <a-checkbox v-model:checked="formState[item.key]">
+                <!-- 域名查询插件是「容器」：本身由子插件聚合出状态，不能直接勾选，
+                     点击箭头展开二级菜单挑选具体插件 -->
+                <div v-if="item.key === 'dns_query_plugin'" class="dns-plugin-trigger">
+                  <a-checkbox
+                    :checked="dnsPluginTriState === 'all'"
+                    :indeterminate="dnsPluginTriState === 'some'"
+                    disabled
+                  />
+                  <a-dropdown v-model:open="dnsPluginMenuOpen" :trigger="['click']" placement="bottomLeft">
+                    <span class="plugin-check-label dns-plugin-trigger-label">
+                      {{ item.label }}
+                      <down-outlined style="font-size: 10px; margin-left: 4px;" />
+                    </span>
+                    <template #overlay>
+                      <div class="dns-plugin-menu" @click.stop>
+                        <div class="dns-plugin-presets">
+                          <a-button
+                            size="small"
+                            :type="dnsPluginActivePreset === 'default' ? 'primary' : 'default'"
+                            @click="applyDnsPluginPreset('default')"
+                          >{{ taskText('tasks.dnsPluginPresetDefault') }}</a-button>
+                          <a-button
+                            size="small"
+                            :type="dnsPluginActivePreset === 'all' ? 'primary' : 'default'"
+                            @click="applyDnsPluginPreset('all')"
+                          >{{ taskText('tasks.dnsPluginPresetAll') }}</a-button>
+                          <a-button
+                            size="small"
+                            :type="dnsPluginActivePreset === 'none' ? 'primary' : 'default'"
+                            @click="applyDnsPluginPreset('none')"
+                          >{{ taskText('tasks.dnsPluginPresetNone') }}</a-button>
+                        </div>
+                        <div class="dns-plugin-menu-hint">{{ taskText('tasks.dnsPluginMenuHint') }}</div>
+                        <a-checkbox-group
+                          v-if="enabledQueryPlugins.length"
+                          v-model:value="formState.dns_query_plugin_sources"
+                          class="dns-plugin-list"
+                        >
+                          <a-checkbox v-for="p in enabledQueryPlugins" :key="p.name" :value="p.name">
+                            {{ p.name }}
+                          </a-checkbox>
+                        </a-checkbox-group>
+                        <div v-else class="dns-plugin-menu-hint">
+                          {{ taskText('tasks.dnsPluginNoneEnabled') }}
+                        </div>
+                      </div>
+                    </template>
+                  </a-dropdown>
+                </div>
+
+                <a-checkbox v-else v-model:checked="formState[item.key]">
                   <span class="plugin-check-label">{{ item.label }}</span>
                 </a-checkbox>
               </a-col>
@@ -2206,10 +2256,75 @@ const defaultFormState = {
   port_scan_type: undefined,
   alt_dns_dict: undefined,
   file_leak_dict: undefined,
+  // 本次任务实际启用的域名收集插件（二级菜单勾选结果）。
+  // dns_query_plugin 本身由它派生：列表非空即视为开启，空即视为不启用该阶段。
+  dns_query_plugin_sources: [],
   ...defaultPlugins
 };
 
 const formState = reactive({ ...defaultFormState });
+
+// ==========================================
+// 🔌 域名收集插件二级菜单
+// ==========================================
+const queryPlugins = ref([]);          // 全局插件清单（含 enable / active_default）
+const dnsPluginMenuOpen = ref(false);
+const dnsPluginInitialized = ref(false);
+
+// 仅「全局启用」的插件才会出现在勾选清单里
+const enabledQueryPlugins = computed(() => queryPlugins.value.filter(p => p.enable));
+
+// 三个预设各自对应的插件集合
+const dnsPluginPresetSets = computed(() => ({
+  // 默认：只勾选「默认对项目生效」的插件
+  default: enabledQueryPlugins.value.filter(p => p.active_default).map(p => p.name),
+  all: enabledQueryPlugins.value.map(p => p.name),
+  none: []
+}));
+
+// 勾选框三态：全部生效 / 部分生效 / 全部不生效
+const dnsPluginTriState = computed(() => {
+  const total = enabledQueryPlugins.value.length;
+  const selected = (formState.dns_query_plugin_sources || []).length;
+  if (!total || !selected) return 'none';
+  return selected >= total ? 'all' : 'some';
+});
+
+// 当前勾选结果与哪个预设一致，用于高亮预设按钮
+const dnsPluginActivePreset = computed(() => {
+  const selected = [...(formState.dns_query_plugin_sources || [])].sort().join(',');
+  const sets = dnsPluginPresetSets.value;
+  for (const key of Object.keys(sets)) {
+    if ([...sets[key]].sort().join(',') === selected) return key;
+  }
+  return '';
+});
+
+const applyDnsPluginPreset = (key) => {
+  formState.dns_query_plugin_sources = [...(dnsPluginPresetSets.value[key] || [])];
+  syncDnsQueryPluginFlag();
+};
+
+// dns_query_plugin 是提交给后端的开关，始终由勾选结果派生，避免两者不一致
+const syncDnsQueryPluginFlag = () => {
+  formState.dns_query_plugin = (formState.dns_query_plugin_sources || []).length > 0;
+};
+
+const fetchQueryPlugins = async () => {
+  try {
+    const res = await request.get('/system_config/query_plugins');
+    if (res.code === 200 && res.data) {
+      queryPlugins.value = res.data.plugins || [];
+      // 首次拿到清单后按「默认」预设初始化勾选（默认项即默认对项目生效的插件）
+      if (!dnsPluginInitialized.value) {
+        applyDnsPluginPreset('default');
+        dnsPluginInitialized.value = true;
+      }
+    }
+  } catch (error) {
+    console.error('获取域名收集插件清单异常:', error);
+  }
+};
 
 // 提交前如实预告任务派生数量（域名逐个建任务，IP/CIDR 合并为一个任务）
 const fanoutHint = computed(() => describeTaskFanout(formState.target));
@@ -2256,16 +2371,21 @@ const toggleCategory = (category) => {
   category.plugins.forEach(p => {
     formState[p.key] = !allChecked;
   });
+  // 域名查询插件是容器，开关状态由子项派生：本类全选/清空时需同步其勾选清单，
+  // 否则会出现「开关打开但清单为空」的不一致
+  if (category.plugins.some(p => p.key === 'dns_query_plugin')) {
+    applyDnsPluginPreset(allChecked ? 'none' : 'all');
+  }
 };
 
 const applyPreset = (type) => {
   if (type === 'fast') {
     Object.keys(defaultPlugins).forEach(k => { formState[k] = false; });
-    formState.dns_query_plugin = true;
     formState.domain_brute = true;
     formState.port_scan = true;
     formState.skip_scan_cdn_ip = true;
     formState.site_identify = true;
+    applyDnsPluginPreset('default');
     message.info(taskText('tasks.quickDiscoveryPresetApplied'));
   } else if (type === 'normal') {
     Object.keys(defaultPlugins).forEach(k => { formState[k] = defaultPlugins[k]; });
@@ -2273,6 +2393,7 @@ const applyPreset = (type) => {
     formState.file_leak = true;
     formState.service_detection = true;
     formState.ssl_cert = true;
+    applyDnsPluginPreset('default');
     message.info(taskText('tasks.standardDiscoveryPresetApplied'));
   } else if (type === 'deep') {
     // 「深度全量」会一并关闭「跳过 CDN」，显著扩大扫描面，先向用户明示后果再套用
@@ -2285,6 +2406,7 @@ const applyPreset = (type) => {
       onOk: () => {
         Object.keys(defaultPlugins).forEach(k => { formState[k] = true; });
         formState.skip_scan_cdn_ip = false;
+        applyDnsPluginPreset('all');
         message.info(taskText('tasks.fullDiscoveryPresetApplied'));
       }
     });
@@ -2294,6 +2416,8 @@ const applyPreset = (type) => {
 const doSubmitTask = async () => {
   submitLoading.value = true;
   try {
+    // 提交前把容器开关与勾选清单对齐，保证后端收到的 dns_query_plugin 与清单一致
+    syncDnsQueryPluginFlag();
     const payload = { ...formState };
     // 🛡️ 服务识别双向严格协同（开启同开，关闭同关）
     payload.npoc_service_detection = !!payload.service_detection;
@@ -2482,6 +2606,9 @@ onMounted(async () => {
     delete nextQuery.view;
     router.replace({ query: nextQuery });
   }
+
+  // 拉取域名收集插件清单，用于「新建任务」里域名查询插件的二级勾选菜单
+  fetchQueryPlugins();
 
   if (activeMainTab.value === 'enterprise') {
     fetchEnterpriseTasks(enterprisePagination.current, enterprisePagination.pageSize);
@@ -3236,6 +3363,56 @@ onUnmounted(() => {
 .plugin-check-label {
   font-size: 12px;
   color: var(--arl-text-color);
+}
+
+/* ===== 域名查询插件：容器式勾选 + 二级插件菜单 ===== */
+.dns-plugin-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dns-plugin-trigger-label {
+  cursor: pointer;
+  user-select: none;
+}
+
+.dns-plugin-trigger-label:hover {
+  color: var(--arl-theme-color);
+}
+
+.dns-plugin-menu {
+  min-width: 240px;
+  max-width: 320px;
+  padding: 10px 12px;
+  background: var(--arl-bg-white);
+  border-radius: 6px;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.16);
+}
+
+.dns-plugin-presets {
+  display: flex;
+  gap: 8px;
+}
+
+.dns-plugin-menu-hint {
+  font-size: 12px;
+  color: var(--arl-text-color);
+  opacity: 0.6;
+  margin: 8px 0;
+}
+
+.dns-plugin-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.dns-plugin-list :deep(.ant-checkbox-wrapper) {
+  font-size: 12px;
+  margin-inline-start: 0;
 }
 
 .fofa-test-result-box {

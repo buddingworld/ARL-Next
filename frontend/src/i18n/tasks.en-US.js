@@ -756,5 +756,12 @@ export default {
   "geoLocation": "Location",
   "version": "Version",
   "taskId": "Task ID",
-  "fuzzing": "Fuzzing"
+  "fuzzing": "Fuzzing",
+
+  // ==================== Domain lookup plugins ====================
+  "dnsPluginPresetDefault": "Default",
+  "dnsPluginPresetAll": "Select all",
+  "dnsPluginPresetNone": "Clear all",
+  "dnsPluginMenuHint": "Pick the plugins to use for this task. \"Default\" selects every plugin marked as active by default.",
+  "dnsPluginNoneEnabled": "No domain-collection plugin is enabled globally. Enable one in system settings first."
 };

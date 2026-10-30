@@ -1257,5 +1257,10 @@ export default {
   "userLockConfirmTitle": "Lock account",
   "userLockConfirmContent": "Lock user \"{name}\"? They will be unable to sign in and any active session will end immediately.",
   "userUnlockConfirmTitle": "Unlock account",
-  "userUnlockConfirmContent": "Unlock user \"{name}\"? They will be able to sign in again."
+  "userUnlockConfirmContent": "Unlock user \"{name}\"? They will be able to sign in again.",
+
+  // ==================== 0.zone and plugin defaults ====================
+  "zerozoneTitle": "Asset discovery intelligence (0.zone)",
+  "enterYourZerozoneApiKey": "Enter your 0.zone API key",
+  "pluginActiveDefault": "Selected by default for new tasks"
 };

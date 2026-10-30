@@ -98,7 +98,8 @@ DYNAMIC_PROPERTIES = {
     "GITHUB_TOKEN", "DOMAIN_BRUTE_CONCURRENT", "ALT_DNS_CONCURRENT",
     "PROXY_URL", "QUERY_PLUGIN_CONFIG", "WEB_HOOK_URL", "WEB_HOOK_TOKEN",
     "AUTH", "API_KEY", "TYC_ID", "TYC_TOKEN", "PUSH_OPTIONS",
-    "TG_BOT_TOKEN", "TG_CHAT_ID", "SO_SEARCH_COOKIE", "BING_SEARCH_COOKIE"
+    "TG_BOT_TOKEN", "TG_CHAT_ID", "SO_SEARCH_COOKIE", "BING_SEARCH_COOKIE",
+    "ZEROZONE_KEY"
 }
 
 DYNAMIC_KEYS_MAP = {
@@ -168,6 +169,9 @@ class Config(object, metaclass=ConfigMeta):
     _FOFA_URL = "https://fofa.info"
     _FOFA_MAX_PAGE = 5      # 最大查询页数
     _FOFA_PAGE_SIZE = 2000  # 每页2000条
+
+    # 0.zone（零零信安）全局 API KEY，插件 zerozone 直接读取该值
+    _ZEROZONE_KEY = ""
 
     _AUTH = None
     _API_KEY = ""
@@ -265,6 +269,11 @@ try:
             Config._TYC_ID = y["TYC"]["ID"]
         if y["TYC"].get("TOKEN"):
             Config._TYC_TOKEN = y["TYC"]["TOKEN"]
+
+    # *** 0.zone（零零信安）配置 ***
+    # 与 FOFA 一致：密钥走全局配置（可由系统设置界面覆盖），插件处只保留开关
+    if y.get("ZEROZONE"):
+        Config._ZEROZONE_KEY = y["ZEROZONE"].get("KEY", "")
 
     # *** GEOIP 配置 ***
     Config.GEOIP_CITY = y["GEOIP"]["CITY"]

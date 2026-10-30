@@ -756,5 +756,12 @@ export default {
   "geoLocation": "地理位置",
   "version": "版本",
   "taskId": "任务 ID",
-  "fuzzing": "字典探测"
+  "fuzzing": "字典探测",
+
+  // ==================== Domain lookup plugins ====================
+  "dnsPluginPresetDefault": "默认",
+  "dnsPluginPresetAll": "全部开启",
+  "dnsPluginPresetNone": "全部关闭",
+  "dnsPluginMenuHint": "勾选本次任务要使用的插件；「默认」会选中所有标记为默认生效的插件",
+  "dnsPluginNoneEnabled": "当前没有全局启用的域名收集插件，请先到系统设置中开启"
 };

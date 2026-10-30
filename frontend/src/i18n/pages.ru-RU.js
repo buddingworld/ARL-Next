@@ -1257,5 +1257,10 @@ export default {
   "userLockConfirmTitle": "Блокировка учётной записи",
   "userLockConfirmContent": "Заблокировать пользователя «{name}»? Вход станет невозможен, активная сессия будет немедленно завершена.",
   "userUnlockConfirmTitle": "Разблокировка учётной записи",
-  "userUnlockConfirmContent": "Разблокировать пользователя «{name}»? Вход снова станет возможен."
+  "userUnlockConfirmContent": "Разблокировать пользователя «{name}»? Вход снова станет возможен.",
+
+  // ==================== 0.zone and plugin defaults ====================
+  "zerozoneTitle": "Разведка активов (0.zone)",
+  "enterYourZerozoneApiKey": "Введите API-ключ 0.zone",
+  "pluginActiveDefault": "Выбирать по умолчанию для новых задач"
 };

@@ -291,6 +291,34 @@ from app.services.system_config_service import (
 )
 
 
+@ns.route('/query_plugins')
+class QueryPluginsConfig(ARLResource):
+    """
+    域名收集插件清单，供「新建资产侦查任务」勾选使用。
+
+    只暴露「插件名 + 是否全局启用 + 是否默认生效」三项，不含任何凭据；
+    普通用户建任务时也需要读取该清单，故仅要求登录（@auth），不限定管理员。
+    """
+
+    @auth
+    def get(self):
+        from app.config import Config
+
+        plugins = []
+        for name, conf in (Config.QUERY_PLUGIN_CONFIG or {}).items():
+            if not isinstance(conf, dict):
+                continue
+            plugins.append({
+                "name": name,
+                "enable": bool(conf.get("enable", True)),
+                # 缺省视为「默认生效」，兼容本次改动之前写入的插件配置
+                "active_default": bool(conf.get("active_default", True)),
+            })
+
+        plugins.sort(key=lambda item: item["name"])
+        return {"code": 200, "message": "success", "data": {"plugins": plugins}}
+
+
 @ns.route('/capacity_probe')
 class CapacityProbe(ARLResource):
     """
@@ -514,6 +542,7 @@ class GeneralConfig(ARLResource):
             "fofa_url": Config.FOFA_URL,
             "fofa_max_page": Config.FOFA_MAX_PAGE,
             "fofa_page_size": Config.FOFA_PAGE_SIZE,
+            "zerozone_key": Config.ZEROZONE_KEY,
             "so_search_cookie": Config.SO_SEARCH_COOKIE,
             "bing_search_cookie": Config.BING_SEARCH_COOKIE,
             "github_token": Config.GITHUB_TOKEN,
@@ -588,6 +617,7 @@ class GeneralConfig(ARLResource):
         # 外部API
         if "fofa_key" in req_data: doc["fofa_key"] = req_data["fofa_key"]
         if "fofa_url" in req_data: doc["fofa_url"] = req_data["fofa_url"]
+        if "zerozone_key" in req_data: doc["zerozone_key"] = req_data["zerozone_key"]
         if "fofa_max_page" in req_data and req_data["fofa_max_page"] is not None: doc["fofa_max_page"] = int(req_data["fofa_max_page"] or 0)
         if "fofa_page_size" in req_data and req_data["fofa_page_size"] is not None: doc["fofa_page_size"] = int(req_data["fofa_page_size"] or 0)
         

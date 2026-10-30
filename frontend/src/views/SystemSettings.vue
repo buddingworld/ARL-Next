@@ -136,6 +136,17 @@
                 </a-row>
               </a-card>
 
+              <!-- 1.1 0.zone（零零信安）：与 FOFA 一致，密钥走全局配置，插件处只留开关 -->
+              <a-card data-setting-anchor="zerozone" :title="pageText('pages.zerozoneTitle')" size="small" class="page-config-card">
+                <a-row :gutter="24">
+                  <a-col :span="12">
+                    <a-form-item label="0.zone API KEY" class="page-flush-bottom">
+                      <a-input-password v-model:value="generalForm.zerozone_key" :placeholder="pageText('pages.enterYourZerozoneApiKey')" />
+                    </a-form-item>
+                  </a-col>
+                </a-row>
+              </a-card>
+
               <a-row :gutter="16">
                 <!-- 2. 企业与代码监控 (左半边) -->
                 <a-col :span="12">
@@ -184,6 +195,14 @@
                         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
                           <a style="font-weight: 600; text-transform: uppercase; ">{{ pluginName }}</a>
                           <a-switch v-model:checked="conf.enable" size="small" />
+                        </div>
+
+                        <!-- 是否在新建任务时默认勾选该插件（不影响全局启用状态） -->
+                        <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 10px;">
+                          <a-checkbox v-model:checked="conf.active_default" size="small" />
+                          <span style="font-size: 12px; color: var(--arl-text-color); opacity: 0.7;">
+                            {{ pageText('pages.pluginActiveDefault') }}
+                          </span>
                         </div>
                         
                         <a-input 
@@ -1496,7 +1515,8 @@ const handleTestPush = async (type) => {
 // 每个一级 Tab 对应一个配置分组。用户只提交"当前分组内发生变更的字段"，
 // 避免在 A 页改完未保存、切到 B 页点保存时用 B 页旧值覆盖 A 页修改。
 const GENERAL_FIELD_GROUPS = {
-  api_config: ['fofa_key', 'fofa_url', 'fofa_max_page', 'fofa_page_size', 'github_token',
+  api_config: ['fofa_key', 'fofa_url', 'fofa_max_page', 'fofa_page_size', 'zerozone_key',
+               'github_token',
                'tyc_id', 'tyc_token', 'so_search_cookie', 'bing_search_cookie', 'query_plugin_config'],
   message_push: ['push_options', 'dingding', 'feishu', 'wxwork', 'telegram', 'email',
                  'webhook_url', 'webhook_token'],
@@ -1766,6 +1786,7 @@ const saveGeneralGroup = async (group, loadingRef, successText) => {
 const CREDENTIAL_LABELS = [
   { key: 'github_token', label: 'GitHub Token', required: true },
   { key: 'fofa_key', label: 'FOFA KEY', required: false },
+  { key: 'zerozone_key', label: '0.zone KEY', required: false },
   { key: 'tyc_id', get label() { return pageText('pages.tianyanchaId'); }, required: false },
   { key: 'tyc_token', get label() { return pageText('pages.tianyanchaToken'); }, required: false },
   { key: 'so_search_cookie', get label() { return pageText('pages.360SearchCookie'); }, required: false },
@@ -1843,6 +1864,7 @@ const generalForm = ref({
   fofa_url: '',
   fofa_max_page: 5,
   fofa_page_size: 2000,
+  zerozone_key: '',
   github_token: '',
   tyc_id: '',
   tyc_token: '',
@@ -1886,6 +1908,15 @@ const fetchGeneralConfig = async () => {
         telegram: { ...generalForm.value.telegram, ...(res.data.telegram || {}) },
         email: { ...generalForm.value.email, ...(res.data.email || {}) }
       };
+
+      // active_default 缺省视为 true：本次改动之前保存过的插件配置没有该字段，
+      // 直接绑定到复选框会显示为「未勾选」，与实际生效语义不符
+      const pluginConf = generalForm.value.query_plugin_config || {};
+      Object.keys(pluginConf).forEach((name) => {
+        if (pluginConf[name] && typeof pluginConf[name] === 'object') {
+          pluginConf[name].active_default = pluginConf[name].active_default !== false;
+        }
+      });
       // 先拉生效值回填只读项，再确立基线：否则回填本身会被误判为"用户改动"
       await fetchMergedConfig();
       captureBaseline();

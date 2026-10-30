@@ -1257,5 +1257,10 @@ export default {
   "userLockConfirmTitle": "锁定账号",
   "userLockConfirmContent": "确认锁定用户「{name}」吗？锁定后该账号将无法登录，已登录的会话也会立即失效。",
   "userUnlockConfirmTitle": "解锁账号",
-  "userUnlockConfirmContent": "确认解锁用户「{name}」吗？解锁后该账号可重新登录。"
+  "userUnlockConfirmContent": "确认解锁用户「{name}」吗？解锁后该账号可重新登录。",
+
+  // ==================== 0.zone and plugin defaults ====================
+  "zerozoneTitle": "空间测绘情报 (0.zone)",
+  "enterYourZerozoneApiKey": "请输入 0.zone API KEY",
+  "pluginActiveDefault": "新建任务时默认勾选"
 };

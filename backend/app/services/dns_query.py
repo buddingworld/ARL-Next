@@ -93,6 +93,9 @@ def run_plugin(p, target) -> (str, list):
                 return source_name, []
 
             plugin_enable_flag = source_kwargs.pop("enable", True)
+            # active_default 只描述「新建任务时是否默认勾选」，属于界面元信息，
+            # 不是插件的运行参数，这里先摘掉再传给 init_key
+            source_kwargs.pop("active_default", None)
             if not plugin_enable_flag:
                 logger.debug(f"skip {source_name}, enable is set false")
                 return source_name, []
